@@ -6,20 +6,46 @@ import cv2
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 from geometry_msgs.msg import Twist
+from std_msgs.msg import String
+from rosgraph_msgs.msg import Clock
 
 class topic_publisher:
 
   def __init__(self):
     print("init")
     self.bridge = CvBridge()
-    self.image_sub = rospy.Subscriber("R1/pi_camera/image_raw",Image,self.callback)
-    # self.clock_sub = rospy.Subscriber("/clock", int)
-    self.move_pub = rospy.Publisher("R1/cmd_vel", Twist, queue_size=1)
-    # self.score_pub = rospy.Publisher("/score_tracker", std_msgs/String, queue_size=1)
+    self.count = 0
     self.previous_error = -100
+    self.image_sub = rospy.Subscriber("R1/pi_camera/image_raw",Image,self.callback)
+    self.move_pub = rospy.Publisher("R1/cmd_vel", Twist, queue_size=1)
+    self.score_pub = rospy.Publisher("/score_tracker", String, queue_size=1)
+    self.clock_sub = rospy.Subscriber("/clock", Clock, self.clock_callback)
+    # self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
+    # self.score_pub.publish("Team1,pswd,0,NA")
+
     print("init done")
 
+  def clock_callback(self, data):
+    if self.count == 0:
+      print("clock_callback")
+      self.count += 1
+      self.time_start = data.clock.secs
+    if self.count == 1 and data.clock.secs - self.time_start > 1:
+      self.score_pub.publish("Team1,pswd,0,NA")
+      print("clock_callback start")
+      self.count += 1
+    if data.clock.secs - self.time_start > 12 and self.count == 2:
+      self.score_pub.publish("Team1,pswd,-1,NA")
+      print("clock_callback finish")
+      self.count += 1
+    
+
   def callback(self,data):
+    if self.count != 2:
+      self.move_pub.publish(Twist())
+      return
+      
+
     try:
       cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
     except CvBridgeError as e:
@@ -58,7 +84,7 @@ class topic_publisher:
 
     
 
-    cv2.imshow("Image window", cv_image)
+    # cv2.imshow("Image window", cv_image)
     cv2.waitKey(3)
 
     # #PID controller
@@ -70,17 +96,18 @@ class topic_publisher:
     self.previous_error = error
 
     # move.angular.z = -(Kp * error + Kd * derivative)
-    # #decrease linear speed as angular speed increases from a max of 3 down to 1.xx? if abs(error) > 400
-    # move.linear.x = max(0, 3 - 0.0065 * abs(error))
-
-    move.linear.x = 0.05
+    #decrease linear speed as angular speed increases from a max of 3 down to 1.xx? if abs(error) > 400
+    # move.linear.x = max(0, 0.05 - 0.00065 * abs(error))
+    move.linear.x = 0.2
 
     self.move_pub.publish(move)
 
 def main(args): 
-  tp = topic_publisher()
   print("main")
   rospy.init_node('topic_publisher')
+  # delay for 1 second
+  rospy.sleep(1)
+  tp = topic_publisher()
   try:
     rospy.spin()
   except KeyboardInterrupt:
