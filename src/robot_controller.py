@@ -9,10 +9,12 @@ from geometry_msgs.msg import Twist
 from std_msgs.msg import String
 from rosgraph_msgs.msg import Clock
 
+TEAM_NAME = "Team1"
+PASSWORD = "pswd"
+
 class topic_publisher:
 
   def __init__(self):
-    print("init")
     self.bridge = CvBridge()
     self.count = 0
     self.previous_error = -100
@@ -23,20 +25,15 @@ class topic_publisher:
     # self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
     # self.score_pub.publish("Team1,pswd,0,NA")
 
-    print("init done")
-
   def clock_callback(self, data):
     if self.count == 0:
-      print("clock_callback")
       self.count += 1
       self.time_start = data.clock.secs
     if self.count == 1 and data.clock.secs - self.time_start > 1:
-      self.score_pub.publish("Team1,pswd,0,NA")
-      print("clock_callback start")
+      self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
       self.count += 1
     if data.clock.secs - self.time_start > 12 and self.count == 2:
-      self.score_pub.publish("Team1,pswd,-1,NA")
-      print("clock_callback finish")
+      self.score_pub.publish("%s,%s,-1,NA" % (TEAM_NAME, PASSWORD))
       self.count += 1
     
 
