@@ -13,9 +13,9 @@ class topic_publisher:
     print("init")
     self.bridge = CvBridge()
     self.image_sub = rospy.Subscriber("R1/pi_camera/image_raw",Image,self.callback)
-    self.clock_sub = rospy.Subscriber("/clock", int)
+    # self.clock_sub = rospy.Subscriber("/clock", int)
     self.move_pub = rospy.Publisher("R1/cmd_vel", Twist, queue_size=1)
-    self.score_pub = rospy.Publisher("/score_tracker", std_msgs/String, queue_size=1)
+    # self.score_pub = rospy.Publisher("/score_tracker", std_msgs/String, queue_size=1)
     self.previous_error = -100
     print("init done")
 
@@ -64,16 +64,18 @@ class topic_publisher:
     # #PID controller
     move = Twist()
 
-    Kp = 0.017
-    Kd = 0.03
+    Kp = 0.0017
+    Kd = 0.003
     derivative = error - self.previous_error
     self.previous_error = error
 
-    move.angular.z = -(Kp * error + Kd * derivative)
-    #decrease linear speed as angular speed increases from a max of 3 down to 1.xx? if abs(error) > 400
-    move.linear.x = max(0, 3 - 0.0065 * abs(error))
+    # move.angular.z = -(Kp * error + Kd * derivative)
+    # #decrease linear speed as angular speed increases from a max of 3 down to 1.xx? if abs(error) > 400
+    # move.linear.x = max(0, 3 - 0.0065 * abs(error))
 
-    self.image_pub.publish(move)
+    move.linear.x = 0.05
+
+    self.move_pub.publish(move)
 
 def main(args): 
   tp = topic_publisher()
