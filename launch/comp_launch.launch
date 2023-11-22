@@ -1,0 +1,7 @@
+<include file="$(find gazebo_ros)/launch/empty_world.launch">
+	<env name="GAZEBO_RESOURCE_PATH" value="$(find enph353_ros_lab)"/>
+	<env name="GAZEBO_MODEL_PATH" value="$(find enph353_ros_lab)/models"/>
+	<arg name="world_name" value="$(find enph353_ros_lab)/worlds/353_ros_lab.world"/>
+	<arg name="gui" value="true"/>
+</include>
+
