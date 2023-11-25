@@ -3,42 +3,40 @@
 import sys
 import rospy
 import cv2
+import time
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 from geometry_msgs.msg import Twist
 from std_msgs.msg import String
 from rosgraph_msgs.msg import Clock
 
-TEAM_NAME = "Team1"
+TEAM_NAME = "MchnEarn"
 PASSWORD = "pswd"
+END_TIME = 10
 
 class topic_publisher:
 
   def __init__(self):
     self.bridge = CvBridge()
-    self.count = 0
     self.previous_error = -100
     self.image_sub = rospy.Subscriber("R1/pi_camera/image_raw",Image,self.callback)
     self.move_pub = rospy.Publisher("R1/cmd_vel", Twist, queue_size=1)
     self.score_pub = rospy.Publisher("/score_tracker", String, queue_size=1)
     self.clock_sub = rospy.Subscriber("/clock", Clock, self.clock_callback)
-    # self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
-    # self.score_pub.publish("Team1,pswd,0,NA")
+    self.running = False
+    time.sleep(1)
+    self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
+    self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
+    self.running = True
 
   def clock_callback(self, data):
-    if self.count == 0:
-      self.count += 1
-      self.time_start = data.clock.secs
-    if self.count == 1 and data.clock.secs - self.time_start > 1:
-      self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
-      self.count += 1
-    if data.clock.secs - self.time_start > 12 and self.count == 2:
+    if data.clock.secs - self.time_start > END_TIME and self.running:
+      self.running = False
       self.score_pub.publish("%s,%s,-1,NA" % (TEAM_NAME, PASSWORD))
-      self.count += 1
     
 
   def callback(self,data):
-    if self.count != 2:
+    if not self.running:
       self.move_pub.publish(Twist())
       return
       
@@ -102,8 +100,6 @@ class topic_publisher:
 def main(args): 
   print("main")
   rospy.init_node('topic_publisher')
-  # delay for 1 second
-  rospy.sleep(1)
   tp = topic_publisher()
   try:
     rospy.spin()
