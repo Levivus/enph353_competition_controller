@@ -9,10 +9,17 @@ from cv_bridge import CvBridge, CvBridgeError
 from geometry_msgs.msg import Twist
 from std_msgs.msg import String
 from rosgraph_msgs.msg import Clock
+from enum import Enum
 
 TEAM_NAME = "MchnEarn"
 PASSWORD = "pswd"
 END_TIME = 10
+
+class State(Enum):
+    SHUTDOWN = 1 # Some random states, will update later as needed
+    DRIVING = 2  # for example, may have multiple driving states (depending on location),
+    ACTIVE = 3   # a pedestrian stop state, a clue state, etc.
+    ENDED = 4
 
 class topic_publisher:
 
@@ -23,23 +30,50 @@ class topic_publisher:
     self.move_pub = rospy.Publisher("R1/cmd_vel", Twist, queue_size=1)
     self.score_pub = rospy.Publisher("/score_tracker", String, queue_size=1)
     self.clock_sub = rospy.Subscriber("/clock", Clock, self.clock_callback)
-    self.running = False
+    self.running = False # Prevent callback from running before competition starts
     time.sleep(1)
     self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
     self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
     self.running = True
 
   def clock_callback(self, data):
+    """Callback for the clock subscriber
+    Publishes the score to the score tracker node when the competition ends
+    """
     if data.clock.secs - self.time_start > END_TIME and self.running:
       self.running = False
       self.score_pub.publish("%s,%s,-1,NA" % (TEAM_NAME, PASSWORD))
     
 
   def callback(self,data):
-    if not self.running:
+    """Callback for the image subscriber
+    Calls the appropriate function based on the state of the robot
+    This is the main logic loop of the robot
+    """
+    state, new_data = self.get_state(data)
+    if state == State.SHUTDOWN: #TODO: shut down the script? - may not even need this state once this is implemented
       self.move_pub.publish(Twist())
-      return
-      
+    elif state == State.DRIVING:
+      self.driving(new_data)
+
+
+
+  def get_state(self, data):
+    """Returns the current state of the robot, based on the image data
+    Based on what the state will be, new data may be returned as well
+    """
+    # Depending on needs of states, the state datatype may have to be changed to allow for multiple states at once
+
+    if not self.running: #if the competition is over, stop the robot, do nothing else
+      return State.SHUTDOWN, data
+    
+    return State.DRIVING, data
+  
+
+
+  
+  def driving(self, data):
+    """Function for the DRIVING state"""
 
     try:
       cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
@@ -96,6 +130,7 @@ class topic_publisher:
     move.linear.x = 0.2
 
     self.move_pub.publish(move)
+  
 
 def main(args): 
   print("main")
