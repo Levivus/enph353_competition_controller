@@ -2,25 +2,19 @@
 
 import sys
 import rospy
-import cv2
+import numpy as np
 from gazebo_msgs.msg import ModelState
 from gazebo_msgs.srv import SetModelState
+from tf.transformations import quaternion_from_euler
 import threading
+import time
 
 class topic_publisher:
 
   def __init__(self):
-    self.bridge = CvBridge()
-    # self.previous_error = -100
-    # self.image_sub = rospy.Subscriber("R1/pi_camera/image_raw",Image,self.callback)
-    # self.move_pub = rospy.Publisher("R1/cmd_vel", Twist, queue_size=1)
-    # self.score_pub = rospy.Publisher("/score_tracker", String, queue_size=1)
-    # self.clock_sub = rospy.Subscriber("/clock", Clock, self.clock_callback, queue_size=1)
-    # self.running = False # Prevent callback from running before competition starts
-    # time.sleep(1)
-    # self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
-    # self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
-    # self.running = True
+    self.running = False # Prevent callback from running before competition starts
+    time.sleep(1)
+    self.running = True
   
   def spawn_position(self, position):
 
@@ -46,12 +40,20 @@ class topic_publisher:
   def keyboard_input_handler(self):
     while not rospy.is_shutdown():
         # Get user input from the keyboard
-        user_input = input("Press 'r' to spawn position, 'q' to quit: ")
+        user_input = input("'h' for the start, 'p' for the first pink, 't' for troubl area, followed by the orientation in degrees (00), 'q' to quit: ")
+        orientation = float(user_input[1:])
+        location = user_input[0]
+        print("orientation: ", orientation)
+        x, y, z, w = quaternion_from_euler(*(0.0, 0.0, np.radians(orientation)))
+        print("x, y, z, w: ", x, y, z, w)
 
         # Check the user input
-        if user_input.lower() == 'r':
-            # Call the spawn_position function with your desired position
-            self.spawn_position([1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        if location == 'h':
+            self.spawn_position([5.5, 2.0, 0.1, x, y, z, w])
+        elif location == 'p':
+            self.spawn_position([0.5, 0.0, 0.1, x, y, z, w])
+        elif location == 't':
+            self.spawn_position([4.0, -1.4, 0.1, x, y, z, w])
         elif user_input.lower() == 'q':
             rospy.signal_shutdown("User requested shutdown.")
   
@@ -59,15 +61,14 @@ class topic_publisher:
 def main(args): 
   # print("main")
   rospy.init_node('topic_publisher')
-  topic_publisher()
+  tp = topic_publisher()
   # Start a new thread to handle keyboard input
-  input_thread = threading.Thread(target=topic_publisher.keyboard_input_handler, args=())
+  input_thread = threading.Thread(target=tp.keyboard_input_handler, args=())
   input_thread.start()
   try:
     rospy.spin()
   except KeyboardInterrupt:
     print("Shutting down")
-  cv2.destroyAllWindows()
   print("main done")
 
 if __name__ == '__main__':

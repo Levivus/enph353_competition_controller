@@ -1,8 +1,8 @@
 <launch>
 	<!-- My Package launch file -->
    <node pkg="enph353_competition_controller"
-         type="Respawn.py"
-         name="Respawn" 
+         type="respawn.py"
+         name="respawn" 
          output="screen">
    </node>
 </launch>
