@@ -253,7 +253,7 @@ class topic_publisher:
         print("angular speed:", move.angular.z, "\n")
         # decrease linear speed as angular speed increases from a max of 3 down to 1.xx? if abs(error) > 400
         move.linear.x = max(0, 0.1 - 0.00065 * abs(error))
-        # move.linear.x = 0.2
+        move.linear.x = 0.2
 
         self.move_pub.publish(move)
 
