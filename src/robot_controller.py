@@ -51,8 +51,8 @@ class State:
 
     class Location(Enum):
         ROAD = 0
-        DESERT = 1
-        OFFROAD = 2
+        OFFROAD = 1
+        DESERT = 2
         MOUNTAIN = 3
 
     class Action(Enum):
@@ -69,7 +69,7 @@ class State:
     PINK_ON = 0b00010000
 
     # location list
-    LOCATIONS = [Location.ROAD, Location.DESERT, Location.OFFROAD, Location.MOUNTAIN]
+    LOCATIONS = [Location.ROAD, Location.OFFROAD, Location.DESERT, Location.MOUNTAIN]
 
     def __init__(self):
         # Define the initial state
@@ -81,14 +81,14 @@ class State:
 
     def choose_action(self):
         if self.current_state & self.PINK:
-            if self.current_state & self.PINK_ON:
+            if self.current_state & self.PINK_ON and time.time() - self.last_pink_time > 5:
                 self.last_pink_time = time.time()
                 self.current_state &= ~self.PINK_ON
                 self.location_count += 1
                 self.current_location = self.LOCATIONS[self.location_count]
-            elif time.time() - self.last_pink_time > 5:
-                self.location_count += 1
-                self.current_location = self.LOCATIONS[self.location_count]
+            # elif time.time() - self.last_pink_time > 5:
+            #     self.location_count += 1
+            #     self.current_location = self.LOCATIONS[self.location_count]
                 return self.Action.DRIVE
         elif self.current_state & self.RED:
             return self.Action.RESPAWN
@@ -135,12 +135,13 @@ class topic_publisher:
         Calls the appropriate function based on the state of the robot
         This is the main logic loop of the robot
         """
+        print()
         cv_image = self.set_state(data)
         action = self.state.choose_action()
 
         # for debugging
         state_list = {0b00000001:"DRIVING", 0b00000010:"PINK", 0b00000100:"RED", 0b00001000:"CLUE", 0b00010000:"PINK_ON"}
-        print(self.state.current_location)
+        print("location:", self.state.current_location)
         cv2.putText(
             cv_image,
             str(self.state.current_state),
@@ -176,7 +177,6 @@ class topic_publisher:
         """Returns the current state of the robot, based on the image data
         Based on what the state will be, new data may be returned as well
         """
-        
         try:
             cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
         except CvBridgeError as e:
@@ -186,11 +186,11 @@ class topic_publisher:
         # Pink
         pink_mask = cv2.inRange(cv_image, LOWER_PINK, UPPER_PINK)
         pink_pixel_count = cv2.countNonZero(pink_mask)
-        print("pink pixel count:", pink_pixel_count)
+        print("Pink pixel count:", pink_pixel_count)
         # Red
         red_mask = cv2.inRange(cv_image, LOWER_RED, UPPER_RED)
         red_pixel_count = cv2.countNonZero(red_mask)
-        print("red pixel count:", red_pixel_count)
+        print("Red pixel count:", red_pixel_count)
 
         # Create a local state that will be added by bitwise OR
         state = 0b00000000
@@ -267,39 +267,95 @@ class topic_publisher:
             )
 
         cv2.imshow("Driving Image", cv_image)
-        cv2.imshow("Mask", mask)
+        # cv2.imshow("Mask", mask)
         cv2.waitKey(3)
 
         # PID controller
         move = Twist()
 
-        print("Error", error)
+        print("Road error", error)
         derivative = error - self.previous_error
         self.previous_error = error
 
         move.angular.z = -(KP * error + KD * derivative)
-        print("angular speed:", move.angular.z, "\n")
+        print("Road angular speed:", move.angular.z)
 
         # decrease linear speed as angular speed increases from a max of 3 down to 1.xx? if abs(error) > 400
         move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
 
         self.move_pub.publish(move)
+
     def offroad_driving(self, cv_image):
         print("desert driving")
+        count = 0
         lost_left = False
-        contour_colour = (0, 255, 0)
+        contour_colour = (0, 0, 255)
 
 
         mask = cv2.inRange(cv_image, LOWER_DIRT, UPPER_DIRT)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for contour in contours:
-            cv2.drawContours(cv_image, [contour], -1, contour_colour, 2)
+
+
+
+
+        # Sort contours based on area in descending order
+        sorted_contours = sorted(contours, key=cv2.contourArea, reverse=True)
+
+        centroids = []
+        # Draw the two largest contours
+        for i in range(min(2, len(sorted_contours))):
+            M = cv2.moments(sorted_contours[i])
+            if M["m00"] == 0:
+                return
+            centroids.append(int(M["m10"] / M["m00"]))
+            y_offset = IMAGE_HEIGHT - CROP_AMOUNT
+            sorted_contours[i][:, 0, 1] += y_offset
+            cv2.drawContours(cv_image, [sorted_contours[i]], -1, (0, 255, 0), 2)
+        error = centroids[0] - centroids[1]
         
-        cv2.imshow("Desert Driving Image", cv_image)
+
+        # if len(sorted_contours) > 0:
+        #     centroids = []
+        #     for contour in sorted_contours[:2]:
+        #         M = cv2.moments(contour)
+        #         if M["m00"] == 0:
+        #             return
+        #         centroids.append(int(M["m10"] / M["m00"]))
+        #         y_offset = IMAGE_HEIGHT - CROP_AMOUNT
+        #         contour[:, 0, 1] += y_offset
+        #         # draw contour onto image
+        #         cv2.drawContours(cv_image, [contour], -1, contour_colour, 2)
+        #     error = centroids[0] - centroids[1]
+        # else:  # no contours detected, so set error directly
+        #     error = -IMAGE_WIDTH / 2 if self.previous_error < 0 else IMAGE_WIDTH / 2
+
+        # cv2.circle(cv_image, (centroids[0], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
+        # cv2.circle(cv_image, (centroids[1], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
+        
+        cv2.imshow("Desert Mask", mask)
+        cv2.imshow("Desert Image", cv_image)
+        
         cv2.waitKey(3)
+
+        # PID controller
         move = Twist()
-        move.linear.x = 0.1
-        self.move_pub.publish(move)
+
+        print("Desert error", error)
+        derivative = error - self.previous_error
+        self.previous_error = error
+
+        move.angular.z = -(KP * error + KD * derivative)
+        print("Deser angular speed:", move.angular.z, "\n")
+
+        # decrease linear speed as angular speed increases from a max of 3 down to 1.xx? if abs(error) > 400
+        move.linear.x = max(0, 0.1 - SPEED_DROP * abs(error))
+
+        if count == 0:
+            move.linear.x = 0.0
+            move.angular.z = 0.0
+            self.move_pub.publish(move)
+            count = 1
+        # self.move_pub.publish(move)
 
     def spawn_position(self, position):
         msg = ModelState()
