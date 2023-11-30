@@ -28,7 +28,7 @@ CROP_AMOUNT = 250
 LOSS_FACTOR = 250
 LOWER_PINK = np.array([200, 0, 200], dtype=np.uint8)
 UPPER_PINK = np.array([255, 150, 255], dtype=np.uint8)
-PINK_THRESHOLD = 10000
+PINK_THRESHOLD = 100000
 LOWER_RED = np.array([0, 0, 200], dtype=np.uint8)
 UPPER_RED = np.array([100, 100, 255], dtype=np.uint8)
 RED_THRESHOLD = 10000
@@ -264,7 +264,7 @@ class topic_publisher:
                 (0, 0, 255),
                 2,
                 cv2.LINE_AA,
-            )
+            )        
 
         cv2.imshow("Driving Image", cv_image)
         # cv2.imshow("Mask", mask)
@@ -306,32 +306,14 @@ class topic_publisher:
                 return
             centroids.append(int(M["m10"] / M["m00"]))
             y_offset = IMAGE_HEIGHT - CROP_AMOUNT
-            # sorted_contours[i][:, 0, 1] += y_offset # issue here
-            cv2.drawContours(cv_image, [sorted_contours[i]], -1, (0, 255, 0), 2)
+            # cv2.drawContours(cv_image, [sorted_contours[i]], -1, (0, 255, 0), 2)
         error = centroids[0] - centroids[1]
-        
 
-        # if len(sorted_contours) > 0:
-        #     centroids = []
-        #     for contour in sorted_contours[:2]:
-        #         M = cv2.moments(contour)
-        #         if M["m00"] == 0:
-        #             return
-        #         centroids.append(int(M["m10"] / M["m00"]))
-        #         y_offset = IMAGE_HEIGHT - CROP_AMOUNT
-        #         contour[:, 0, 1] += y_offset
-        #         # draw contour onto image
-        #         cv2.drawContours(cv_image, [contour], -1, contour_colour, 2)
-        #     error = centroids[0] - centroids[1]
-        # else:  # no contours detected, so set error directly
-        #     error = -IMAGE_WIDTH / 2 if self.previous_error < 0 else IMAGE_WIDTH / 2
-
-        cv2.circle(cv_image, (centroids[0], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
-        cv2.circle(cv_image, (centroids[1], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
+        # cv2.circle(cv_image, (centroids[0], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
+        # cv2.circle(cv_image, (centroids[1], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
         
         cv2.imshow("Desert Mask", mask)
         cv2.imshow("Desert Image", cv_image)
-        
         cv2.waitKey(3)
 
         # PID controller
@@ -342,10 +324,10 @@ class topic_publisher:
         # self.previous_error = error
 
         # move.angular.z = -(KP * error + KD * derivative)
-        # print("Deser angular speed:", move.angular.z, "\n")
+        # print("Desert angular speed:", move.angular.z)
 
-        # # decrease linear speed as angular speed increases from a max of 3 down to 1.xx? if abs(error) > 400
-        # move.linear.x = max(0, 0.1 - SPEED_DROP * abs(error))
+        # move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
+        # print("Desert linear speed:", move.linear.x)
 
         if count == 0:
             move.linear.x = 0.0
