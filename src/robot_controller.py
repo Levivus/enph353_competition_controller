@@ -295,21 +295,18 @@ class topic_publisher:
         mask = cv2.inRange(cv_image, LOWER_DIRT, UPPER_DIRT)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-
-
-
         # Sort contours based on area in descending order
         sorted_contours = sorted(contours, key=cv2.contourArea, reverse=True)
 
         centroids = []
-        # Draw the two largest contours
+        # Draw the two largest contours and get respective centroids
         for i in range(min(2, len(sorted_contours))):
             M = cv2.moments(sorted_contours[i])
             if M["m00"] == 0:
                 return
             centroids.append(int(M["m10"] / M["m00"]))
             y_offset = IMAGE_HEIGHT - CROP_AMOUNT
-            sorted_contours[i][:, 0, 1] += y_offset
+            # sorted_contours[i][:, 0, 1] += y_offset # issue here
             cv2.drawContours(cv_image, [sorted_contours[i]], -1, (0, 255, 0), 2)
         error = centroids[0] - centroids[1]
         
@@ -329,8 +326,8 @@ class topic_publisher:
         # else:  # no contours detected, so set error directly
         #     error = -IMAGE_WIDTH / 2 if self.previous_error < 0 else IMAGE_WIDTH / 2
 
-        # cv2.circle(cv_image, (centroids[0], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
-        # cv2.circle(cv_image, (centroids[1], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
+        cv2.circle(cv_image, (centroids[0], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
+        cv2.circle(cv_image, (centroids[1], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
         
         cv2.imshow("Desert Mask", mask)
         cv2.imshow("Desert Image", cv_image)
@@ -340,15 +337,15 @@ class topic_publisher:
         # PID controller
         move = Twist()
 
-        print("Desert error", error)
-        derivative = error - self.previous_error
-        self.previous_error = error
+        # print("Desert error", error)
+        # derivative = error - self.previous_error
+        # self.previous_error = error
 
-        move.angular.z = -(KP * error + KD * derivative)
-        print("Deser angular speed:", move.angular.z, "\n")
+        # move.angular.z = -(KP * error + KD * derivative)
+        # print("Deser angular speed:", move.angular.z, "\n")
 
-        # decrease linear speed as angular speed increases from a max of 3 down to 1.xx? if abs(error) > 400
-        move.linear.x = max(0, 0.1 - SPEED_DROP * abs(error))
+        # # decrease linear speed as angular speed increases from a max of 3 down to 1.xx? if abs(error) > 400
+        # move.linear.x = max(0, 0.1 - SPEED_DROP * abs(error))
 
         if count == 0:
             move.linear.x = 0.0
