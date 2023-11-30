@@ -18,42 +18,91 @@ TEAM_NAME = "MchnEarn"
 PASSWORD = "pswd"
 END_TIME = 5000000
 HOME = [5.5, 2.6, 0.1, 0.0, 0.0, np.sqrt(2), -np.sqrt(2)]
+DESERT_TEST = [0.5, -1.0, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
 IMAGE_HEIGHT = 720
 IMAGE_WIDTH = 1280
 IMAGE_DEPTH = 3
 
-#CONSTANTS
+# IMAGE MANIPULATION CONSTANTS
 CROP_AMOUNT = 250
 LOSS_FACTOR = 250
 LOWER_PINK = np.array([200, 0, 200], dtype=np.uint8)
 UPPER_PINK = np.array([255, 150, 255], dtype=np.uint8)
+PINK_THRESHOLD = 10000
 LOWER_RED = np.array([0, 0, 200], dtype=np.uint8)
 UPPER_RED = np.array([100, 100, 255], dtype=np.uint8)
-LOWER_COLOR = np.array([0, 0, 78], dtype=np.uint8)
-UPPER_COLOR = np.array([125, 135, 255], dtype=np.uint8)
+RED_THRESHOLD = 10000
+LOWER_ROAD = np.array([0, 0, 78], dtype=np.uint8)
+UPPER_ROAD = np.array([125, 135, 255], dtype=np.uint8)
+LOWER_DIRT = np.array([130, 165, 170], dtype=np.uint8)
+UPPER_DIRT = np.array([160, 210, 210], dtype=np.uint8)
 
-#PID
-Kp = 0.017
-Kd = 0.003
-MAX_SPEED = 0.2
+# PID CONSTANTS
+KP = 0.017
+KD = 0.003
+MAX_SPEED = 0.3
 SPEED_DROP = 0.00055
 
 
 # Some random states, will update later as needed for example, may have
 # multiple driving states (depending on location), a pedestrian stop state,
 # a clue state, etc.
-class State(Enum):
-    SHUTDOWN = 1
-    DRIVING = 2
-    ACTIVE = 3
-    ENDED = 4
-    PEDESTRIAN = 5
+class State:
 
+    class Location(Enum):
+        ROAD = 0
+        DESERT = 1
+        OFFROAD = 2
+        MOUNTAIN = 3
+
+    class Action(Enum):
+        DRIVE = 0
+        CRY = 1
+        RESPAWN = 2
+        EXPLODE = 3
+
+    # Make state bitfield, so that multiple states can be active at once
+    DRIVING = 0b00000001
+    PINK = 0b00000010
+    RED = 0b00000100
+    CLUE = 0b00001000
+    PINK_ON = 0b00010000
+
+    # location list
+    LOCATIONS = [Location.ROAD, Location.DESERT, Location.OFFROAD, Location.MOUNTAIN]
+
+    def __init__(self):
+        # Define the initial state
+        self.location_count = 0
+        self.current_location = self.LOCATIONS[self.location_count]
+        self.last_state = self.DRIVING
+        self.last_pink_time = 0
+        self.current_state = self.DRIVING
+
+    def choose_action(self):
+        if self.current_state & self.PINK:
+            if self.current_state & self.PINK_ON:
+                self.last_pink_time = time.time()
+                self.current_state &= ~self.PINK_ON
+                self.location_count += 1
+                self.current_location = self.LOCATIONS[self.location_count]
+            elif time.time() - self.last_pink_time > 5:
+                self.location_count += 1
+                self.current_location = self.LOCATIONS[self.location_count]
+                return self.Action.DRIVE
+        elif self.current_state & self.RED:
+            return self.Action.RESPAWN
+        elif self.current_state & self.DRIVING:
+            return self.Action.DRIVE
+        # Based on the current state, choose an action to take
+        # This will be where the priority of states is implemented
+    
 
 class topic_publisher:
     def __init__(self):
         self.running = False  # Prevent callback from running before competition starts
         self.bridge = CvBridge()
+        self.state = State()
         self.previous_error = -100
         self.image_sub = rospy.Subscriber(
             "R1/pi_camera/image_raw", Image, self.callback
@@ -61,7 +110,6 @@ class topic_publisher:
         self.move_pub = rospy.Publisher("R1/cmd_vel", Twist, queue_size=1)
         self.score_pub = rospy.Publisher("/score_tracker", String, queue_size=1)
         self.clock_sub = rospy.Subscriber("/clock", Clock, self.clock_callback)
-        self.image_difference = 100000
         self.last_image = np.zeros(
             (IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_DEPTH), dtype=np.uint8
         )
@@ -69,7 +117,7 @@ class topic_publisher:
         self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
         self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
         self.running = True
-        self.spawn_position(HOME)
+        self.spawn_position(DESERT_TEST)
 
     def clock_callback(self, data):
         """Callback for the clock subscriber
@@ -87,70 +135,93 @@ class topic_publisher:
         Calls the appropriate function based on the state of the robot
         This is the main logic loop of the robot
         """
-        state, new_data = self.get_state(data)
+        cv_image = self.set_state(data)
+        action = self.state.choose_action()
 
-        if (state == State.SHUTDOWN):  # TODO: shut down the script? - may not even need this state once this is implemented
+        # for debugging
+        state_list = {0b00000001:"DRIVING", 0b00000010:"PINK", 0b00000100:"RED", 0b00001000:"CLUE", 0b00010000:"PINK_ON"}
+        print(self.state.current_location)
+        cv2.putText(
+            cv_image,
+            str(self.state.current_state),
+            (1000, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+        if (action == State.Action.EXPLODE):  # TODO: shut down the script? - may not even need this state once this is implemented
             self.move_pub.publish(Twist())
             return
 
-        new_image = np.array(self.bridge.imgmsg_to_cv2(new_data, "bgr8"))
+        # new_image = np.array(cv_image)
         # self.image_difference = cv2.norm(self.last_image, new_image, cv2.NORM_L2)
 
-        if state == State.DRIVING:
-            self.driving(new_data)
-        # elif state == State.PEDESTRIAN:
-        #     self.pedestrian(new_data)
+        if action == State.Action.DRIVE and self.state.current_location == State.Location.ROAD:
+            self.driving(cv_image)
+        elif action == State.Action.DRIVE and self.state.current_location == State.Location.OFFROAD:
+            self.offroad_driving(cv_image)
+        # elif action == State.Action.CRY:
+        #     # TODO: implement pedestrian state
+        #     self.driving(cv_image)
+        # elif action == State.Action.RESPAWN:
+        #     # TODO: implement desert state
+        #     self.driving(cv_image)
 
-        self.last_image = np.array(self.bridge.imgmsg_to_cv2(new_data, "bgr8"))
+        self.last_image = np.array(cv_image)
 
-    def get_state(self, data):
+    def set_state(self, data):
         """Returns the current state of the robot, based on the image data
         Based on what the state will be, new data may be returned as well
         """
-        # Depending on needs of states, the state datatype may have to be changed to allow for multiple states at once
-
-        if (not self.running):  # if the competition is over, stop the robot, do nothing else
-            return State.SHUTDOWN, data
-        else:
-            return State.DRIVING, data
-
-    def driving(self, data):
-        """Function for the DRIVING state"""
-
+        
         try:
             cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
         except CvBridgeError as e:
             print(e)
 
-        height, width = cv_image.shape[:2]
-        
-        contour_colour = (0, 255, 0)
-        lost_left = False
-
+        # Generating masks to check for certain colurs
+        # Pink
         pink_mask = cv2.inRange(cv_image, LOWER_PINK, UPPER_PINK)
         pink_pixel_count = cv2.countNonZero(pink_mask)
         print("pink pixel count:", pink_pixel_count)
-
+        # Red
         red_mask = cv2.inRange(cv_image, LOWER_RED, UPPER_RED)
         red_pixel_count = cv2.countNonZero(red_mask)
         print("red pixel count:", red_pixel_count)
-        # if red_pixel_count > 500:
-        #     TODO: Move this type of check into get_state()?
-        #     self.state = State.PEDESTRIAN
-        #     return
 
-        mask = cv2.inRange(cv_image, LOWER_COLOR, UPPER_COLOR)
+        # Create a local state that will be added by bitwise OR
+        state = 0b00000000
 
-        # image processing, including cropping and thresholding
-        # gray_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-        # _, black_image = cv2.threshold(gray_image, 100, 255, type=cv2.THRESH_BINARY)
-        # black_image = cv2.bitwise_not(black_image)
-        # cropped_image = black_image[height - CROP_AMOUNT :, :]
-        # _, mask = cv2.threshold(cropped_image, 128, 255, cv2.THRESH_BINARY)
-
-        mask = mask[height - CROP_AMOUNT :, :]
-
+        if not self.running:
+            return -1, None
         
+        if red_pixel_count > RED_THRESHOLD:
+            state |= self.state.RED
+
+        if pink_pixel_count > PINK_THRESHOLD:
+            state |= self.state.PINK
+            if (self.state.last_state & self.state.PINK) == 0:
+                state |= self.state.PINK_ON
+                
+        state |= self.state.DRIVING
+
+        self.state.last_state = self.state.current_state
+        self.state.current_state = state
+        
+        print("state:", self.state.current_state)
+        return cv_image
+
+    def driving(self, cv_image):
+        """Function for the DRIVING state"""
+        contour_colour = (0, 255, 0)
+        lost_left = False
+
+        mask = cv2.inRange(cv_image, LOWER_ROAD, UPPER_ROAD)
+
+        mask = mask[IMAGE_HEIGHT - CROP_AMOUNT :, :]
 
         # find where the road x position is
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -159,95 +230,29 @@ class topic_publisher:
         if len(contours) > 0:
             largest_contour = max(contours, key=cv2.contourArea)
             # check if any point is at [0][0]
-            print(largest_contour)
-            print(largest_contour[0][0])
-            
+
             if largest_contour[0][0][0] == 0 and largest_contour[0][0][1] == 0:
                 lost_left = True
-                # print("lost left")
-                # contour_colour = (0, 255, 255)
 
-            # bottom_left, top_left, bottom_right, top_right = self.find_corner_points(
-            #     largest_contour
-            # )
-
-            # cv2.circle(
-            #     cv_image,
-            #     (bottom_left[0][0], bottom_left[0][1] + (height - CROP_AMOUNT)),
-            #     7,
-            #     (0, 0, 255),
-            #     -1,
-            # )
-            # cv2.circle(
-            #     cv_image,
-            #     (top_left[0][0], top_left[0][1] + (height - CROP_AMOUNT)),
-            #     7,
-            #     (0, 0, 0),
-            #     -1,
-            # )
-            # cv2.circle(
-            #     cv_image,
-            #     (bottom_right[0][0], bottom_right[0][1] + (height - CROP_AMOUNT)),
-            #     7,
-            #     (255, 0, 0),
-            #     -1,
-            # )
-            # cv2.circle(
-            #     cv_image,
-            #     (top_right[0][0], top_right[0][1] + (height - CROP_AMOUNT)),
-            #     7,
-            #     (0, 255, 0),
-            #     -1,
-            # )
-
-            # for point in largest_contour:
-            #     cv2.circle(
-            #         cv_image, (point[0][0], point[0][1]), 10, (255, 255, 255), -1
-            #     )
-
-            # if bottom_left[0][0] == top_left[0][0]:
-            #     lost_left = True
-            #     contour_colour = (0, 255, 255)
-            # if bottom_right[0][0] == top_right[0][0]:
-            #     lost_right = True
-            #     contour_colour = (0, 165, 255)
-            # if lost_left and lost_right:
-            #     lost = True
-            #     contour_colour = (0, 0, 255)
-            # print("lost:", lost, "lost left:", lost_left, "lost right:", lost_right)
             else:
                 M = cv2.moments(largest_contour)
                 if M["m00"] == 0:
                     # print(contours)
                     return
                 centroid_x = int(M["m10"] / M["m00"])
-                # draw circle onto image
-                # cv2.circle(
-                #     cv_image, (centroid_x, height - CROP_AMOUNT // 2), 5, (0, 0, 255), -1
-                # )
-                # shift contour points to account for cropping
-                y_offset = height - CROP_AMOUNT
+                y_offset = IMAGE_HEIGHT - CROP_AMOUNT
                 largest_contour[:, 0, 1] += y_offset
                 # draw contour onto image
                 cv2.drawContours(cv_image, [largest_contour], -1, contour_colour, 2)
                 # calculate the error
-                error = centroid_x - width / 2  # positive means the car should turn right
+                error = (
+                    centroid_x - IMAGE_WIDTH / 2
+                )  # positive means the car should turn right
 
-
-                # if lost_left:
-                #     error = abs(self.previous_error) + LOSS_FACTOR
-                # if lost_right:
-                #     error = -abs(self.previous_error) - LOSS_FACTOR
-                # if lost:
-                #     error = (
-                #         self.previous_error - LOSS_FACTOR
-                #         if self.previous_error < 0
-                #         else self.previous_error + LOSS_FACTOR
-                #     )
         else:  # no contours detected, so set error directly
-            error = -width / 2 if self.previous_error < 0 else width / 2
+            error = -IMAGE_WIDTH / 2 if self.previous_error < 0 else IMAGE_WIDTH / 2
 
-        if lost_left: # This will bias the car to the left if both sides are lost
+        if lost_left:  # This will bias the car to the left if the left side is lost
             error = -LOSS_FACTOR
             # write onto image
             cv2.putText(
@@ -260,10 +265,9 @@ class topic_publisher:
                 2,
                 cv2.LINE_AA,
             )
-            
 
         cv2.imshow("Driving Image", cv_image)
-        # cv2.imshow("Road Mask Test", mask)
+        cv2.imshow("Mask", mask)
         cv2.waitKey(3)
 
         # PID controller
@@ -273,12 +277,28 @@ class topic_publisher:
         derivative = error - self.previous_error
         self.previous_error = error
 
-        move.angular.z = -(Kp * error + Kd * derivative)
+        move.angular.z = -(KP * error + KD * derivative)
         print("angular speed:", move.angular.z, "\n")
 
         # decrease linear speed as angular speed increases from a max of 3 down to 1.xx? if abs(error) > 400
         move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
 
+        self.move_pub.publish(move)
+    def offroad_driving(self, cv_image):
+        print("desert driving")
+        lost_left = False
+        contour_colour = (0, 255, 0)
+
+
+        mask = cv2.inRange(cv_image, LOWER_DIRT, UPPER_DIRT)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            cv2.drawContours(cv_image, [contour], -1, contour_colour, 2)
+        
+        cv2.imshow("Desert Driving Image", cv_image)
+        cv2.waitKey(3)
+        move = Twist()
+        move.linear.x = 0.1
         self.move_pub.publish(move)
 
     def spawn_position(self, position):
@@ -327,7 +347,7 @@ class topic_publisher:
 
         return bottom_left, top_left, bottom_right, top_right
 
-    def pedestrian(self, data):
+    def pedestrian(self, cv_image):
         """Function for the PEDESTRIAN state"""
         start_time = time.time()
         move = Twist()
@@ -335,7 +355,7 @@ class topic_publisher:
         move.linear.x = 0.1
         while time.time() - start_time < 3:
             self.move_pub.publish(move)
-        self.state = State.DRIVING
+
 
 def main(args):
     print("main")
