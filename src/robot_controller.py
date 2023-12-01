@@ -13,7 +13,7 @@ from enum import Enum
 from gazebo_msgs.msg import ModelState
 from gazebo_msgs.srv import SetModelState
 import numpy as np
-import os
+from sklearn.metrics.pairwise import cosine_similarity as cosine
 
 TEAM_NAME = "MchnEarn"
 PASSWORD = "pswd"
@@ -27,6 +27,7 @@ IMAGE_DEPTH = 3
 # IMAGE MANIPULATION CONSTANTS
 CROP_AMOUNT = 250
 LOSS_FACTOR = 200
+RESPAWN_THRESHOLD = 10
 LOWER_PINK = np.array([200, 0, 200], dtype=np.uint8)
 UPPER_PINK = np.array([255, 150, 255], dtype=np.uint8)
 PINK_THRESHOLD = 100000
@@ -61,8 +62,10 @@ class State:
         CRY = 1
         RESPAWN = 2
         EXPLODE = 3
+        SIT = 4
 
     # Make state bitfield, so that multiple states can be active at once
+    NOTHING = 0b00000000
     DRIVING = 0b00000001
     PINK = 0b00000010
     RED = 0b00000100
@@ -76,12 +79,18 @@ class State:
         # Define the initial state
         self.location_count = 0
         self.current_location = self.LOCATIONS[self.location_count]
-        self.last_state = self.DRIVING
+        self.last_state = self.NOTHING
         self.last_pink_time = 0
-        self.current_state = self.DRIVING
+        self.current_state = self.NOTHING
+    
+    def set_location(self, location):
+        self.current_location = location
+        self.location_count = self.LOCATIONS.index(location)
 
     def choose_action(self):
-        if self.current_state & self.PINK:
+        if self.current_state & self.NOTHING:
+            return self.Action.SIT
+        elif self.current_state & self.PINK:
             if (
                 self.current_state & self.PINK_ON
                 and time.time() - self.last_pink_time > 5
@@ -108,6 +117,7 @@ class topic_publisher:
         self.bridge = CvBridge()
         self.state = State()
         self.previous_error = -100
+        self.count = 0
         self.image_sub = rospy.Subscriber(
             "R1/pi_camera/image_raw", Image, self.callback
         )
@@ -127,10 +137,6 @@ class topic_publisher:
         """Callback for the clock subscriber
         Publishes the score to the score tracker node when the competition ends
         """
-        # TODO: Move this to the callback function
-        # if self.image_difference < 7000:
-        #     self.spawn_position(HOME)
-        #     print("Respawned")
         if self.running and data.clock.secs - self.time_start > END_TIME:
             self.running = False
             self.score_pub.publish("%s,%s,-1,NA" % (TEAM_NAME, PASSWORD))
@@ -144,15 +150,26 @@ class topic_publisher:
         cv_image = self.set_state(data)
         action = self.state.choose_action()
 
+        print("State:", self.state.current_state)
+        print("Action:", action)
+        print("Location:", self.state.current_location)
+
         if (
             action == State.Action.EXPLODE
         ):  # TODO: shut down the script? - may not even need this state once this is implemented
             self.move_pub.publish(Twist())
             return
 
-        # TODO: get this working for respawning, maybe move the check ot here...?
-        # new_image = np.array(cv_image)
-        # self.image_difference = cv2.norm(self.last_image, new_image, cv2.NORM_L2)
+        if self.running:
+            new_image = np.array(cv_image)
+            self.image_difference = np.mean((new_image - self.last_image) ** 2 )
+            print("Image difference:", self.image_difference)
+            if self.image_difference < RESPAWN_THRESHOLD:
+                self.spawn_position(HOME)
+                self.state.current_state = self.state.DRIVING
+                self.state.set_location(State.Location.ROAD)
+                print("Respawned")
+            self.last_image = new_image
 
         if (
             action == State.Action.DRIVE
@@ -171,12 +188,12 @@ class topic_publisher:
         #     # TODO: implement desert state
         #     self.driving(cv_image)
 
-        self.last_image = np.array(cv_image)
-
     def set_state(self, data):
         """Returns the current state of the robot, based on the image data
         Based on what the state will be, new data may be returned as well
         """
+        if not self.running:
+            return -1, None
         try:
             cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
         except CvBridgeError as e:
@@ -195,9 +212,8 @@ class topic_publisher:
         # Create a local state that will be added by bitwise OR
         state = 0b00000000
 
-        if not self.running:
-            return -1, None
 
+        
         if red_pixel_count > RED_THRESHOLD:
             state |= self.state.RED
 
@@ -295,20 +311,23 @@ class topic_publisher:
         cv2.drawContours(cv_image, top_2_contours, -1, contour_colour, 2)
 
         centroids = []
+        if len(top_2_contours) != 0:
         # get the centroids of the two largest contours
-        for i in range(len(top_2_contours)):
-            M = cv2.moments(top_2_contours[i])
-            if M["m00"] == 0:
-                return
-            centroids.append(int(M["m10"] / M["m00"]))
+            for i in range(len(top_2_contours)):
+                M = cv2.moments(top_2_contours[i])
+                if M["m00"] == 0:
+                    return
+                centroids.append(int(M["m10"] / M["m00"]))
 
-        if centroids[0] < IMAGE_WIDTH // 2 and centroids[1] < IMAGE_WIDTH // 2:
-            lost_right = True
-        elif centroids[0] > IMAGE_WIDTH // 2 and centroids[1] > IMAGE_WIDTH // 2:
-            lost_left = True
+            if centroids[0] < IMAGE_WIDTH // 2 and centroids[1] < IMAGE_WIDTH // 2:
+                lost_right = True
+            elif centroids[0] > IMAGE_WIDTH // 2 and centroids[1] > IMAGE_WIDTH // 2:
+                lost_left = True
 
-        # positive means the car should turn left
-        error = IMAGE_WIDTH / 2 - np.mean(centroids)
+            # positive means the car should turn left
+            error = IMAGE_WIDTH / 2 - np.mean(centroids)
+        else:
+            error = -IMAGE_WIDTH / 2 if self.previous_error < 0 else IMAGE_WIDTH / 2
 
         # TODO: maybe smooth this out? might not need it idk
         if lost_left:  # This will bias the car to the left if the left side is lost
