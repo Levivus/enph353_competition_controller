@@ -19,12 +19,12 @@ import os.path
 from os import path
 import inspect
 
-from tensorflow.keras import layers
-from tensorflow.keras import models
-from tensorflow.keras import optimizers
+# from tensorflow.keras import layers
+import tensorflow as tf
+# from tensorflow.keras import optimizers
 
-from tensorflow.keras.utils import plot_model
-from tensorflow.keras import backend
+# from tensorflow.keras.utils import plot_model
+# from tensorflow.keras import backend
 
 
 TEAM_NAME = "MchnEarn"
@@ -124,7 +124,7 @@ class topic_publisher:
         self.running = False  # Prevent callback from running before competition starts
         self.bridge = CvBridge()
         self.state = State()
-        self.letter_model = models.load_model(ABSOLUTE_PATH + "clue_model.h5")
+        self.letter_model = tf.keras.models.load_model(ABSOLUTE_PATH + "clue_model.h5", compile=False)
         self.previous_error = -100
         self.image_sub = rospy.Subscriber(
             "R1/pi_camera/image_raw", Image, self.callback
@@ -139,7 +139,7 @@ class topic_publisher:
         self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
         self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
         self.running = True
-        self.spawn_position(DESERT_TEST)
+        self.spawn_position(HOME)
 
     def clock_callback(self, data):
         """Callback for the clock subscriber
@@ -158,33 +158,33 @@ class topic_publisher:
         This is the main logic loop of the robot
         """
         cv_image = self.set_state(data)
-        action = self.state.choose_action()
+        # action = self.state.choose_action()
 
-        # for debugging
-        state_list = {0b00000001:"DRIVING", 0b00000010:"PINK", 0b00000100:"RED", 0b00001000:"CLUE", 0b00010000:"PINK_ON"}
-        print(self.state.current_location)
-        cv2.putText(
-            cv_image,
-            str(self.state.current_state),
-            (1000, 50),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 0, 255),
-            2,
-            cv2.LINE_AA,
-        )
+        # # for debugging
+        # state_list = {0b00000001:"DRIVING", 0b00000010:"PINK", 0b00000100:"RED", 0b00001000:"CLUE", 0b00010000:"PINK_ON"}
+        # print(self.state.current_location)
+        # cv2.putText(
+        #     cv_image,
+        #     str(self.state.current_state),
+        #     (1000, 50),
+        #     cv2.FONT_HERSHEY_SIMPLEX,
+        #     1,
+        #     (0, 0, 255),
+        #     2,
+        #     cv2.LINE_AA,
+        # )
 
-        if (action == State.Action.EXPLODE):  # TODO: shut down the script? - may not even need this state once this is implemented
-            self.move_pub.publish(Twist())
-            return
+        # if (action == State.Action.EXPLODE):  # TODO: shut down the script? - may not even need this state once this is implemented
+        #     self.move_pub.publish(Twist())
+        #     return
 
-        # new_image = np.array(cv_image)
-        # self.image_difference = cv2.norm(self.last_image, new_image, cv2.NORM_L2)
+        # # new_image = np.array(cv_image)
+        # # self.image_difference = cv2.norm(self.last_image, new_image, cv2.NORM_L2)
 
-        if action == State.Action.DRIVE and self.state.current_location == State.Location.ROAD:
-            self.driving(cv_image)
-        elif action == State.Action.DRIVE and self.state.current_location == State.Location.OFFROAD:
-            self.offroad_driving(cv_image)
+        # if action == State.Action.DRIVE and self.state.current_location == State.Location.ROAD:
+        self.driving(cv_image)
+        # elif action == State.Action.DRIVE and self.state.current_location == State.Location.OFFROAD:
+        #     self.offroad_driving(cv_image)
         # elif action == State.Action.CRY:
         #     # TODO: implement pedestrian state
         #     self.driving(cv_image)
