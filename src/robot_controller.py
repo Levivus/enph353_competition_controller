@@ -13,6 +13,7 @@ from enum import Enum
 from gazebo_msgs.msg import ModelState
 from gazebo_msgs.srv import SetModelState
 import numpy as np
+import os
 
 TEAM_NAME = "MchnEarn"
 PASSWORD = "pswd"
@@ -25,7 +26,7 @@ IMAGE_DEPTH = 3
 
 # IMAGE MANIPULATION CONSTANTS
 CROP_AMOUNT = 250
-LOSS_FACTOR = 250
+LOSS_FACTOR = 200
 LOWER_PINK = np.array([200, 0, 200], dtype=np.uint8)
 UPPER_PINK = np.array([255, 150, 255], dtype=np.uint8)
 PINK_THRESHOLD = 100000
@@ -34,8 +35,8 @@ UPPER_RED = np.array([100, 100, 255], dtype=np.uint8)
 RED_THRESHOLD = 10000
 LOWER_ROAD = np.array([0, 0, 78], dtype=np.uint8)
 UPPER_ROAD = np.array([125, 135, 255], dtype=np.uint8)
-LOWER_DIRT = np.array([130, 165, 170], dtype=np.uint8)
-UPPER_DIRT = np.array([160, 210, 210], dtype=np.uint8)
+LOWER_DIRT = np.array([140, 164, 168], dtype=np.uint8)
+UPPER_DIRT = np.array([186, 220, 228], dtype=np.uint8)
 
 # PID CONSTANTS
 KP = 0.017
@@ -104,6 +105,7 @@ class topic_publisher:
         self.bridge = CvBridge()
         self.state = State()
         self.previous_error = -100
+        self.image_count = 0
         self.image_sub = rospy.Subscriber(
             "R1/pi_camera/image_raw", Image, self.callback
         )
@@ -282,6 +284,7 @@ class topic_publisher:
 
         # decrease linear speed as angular speed increases from a max of 3 down to 1.xx? if abs(error) > 400
         move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
+        print("Road linear speed:", move.linear.x)
 
         self.move_pub.publish(move)
 
@@ -289,52 +292,127 @@ class topic_publisher:
         print("desert driving")
         count = 0
         lost_left = False
+        lost_right = False
         contour_colour = (0, 0, 255)
 
+        # if self.image_count % 10 == 0:
+        #     image_filename = f"image_{self.image_count//10}.png"
+        #     image_path = os.path.join("/home/fizzer/ros_ws/src/enph353_competition_controller/image_testing/driving_images/", image_filename)
+        #     cv2.imwrite(image_path, cv_image)
+        #     rospy.loginfo(f"Saved image: {image_path}")
 
-        mask = cv2.inRange(cv_image, LOWER_DIRT, UPPER_DIRT)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # self.image_count += 1
+
+        # mask = cv2.inRange(cv_image, LOWER_DIRT, UPPER_DIRT)
+        # contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         # Sort contours based on area in descending order
-        sorted_contours = sorted(contours, key=cv2.contourArea, reverse=True)
+        # sorted_contours = sorted(contours, key=cv2.contourArea, reverse=True)
+
+        top_2_contours = self.process_image(cv_image)
+        cv2.drawContours(cv_image, top_2_contours, -1, contour_colour, 2)
 
         centroids = []
-        # Draw the two largest contours and get respective centroids
-        for i in range(min(2, len(sorted_contours))):
-            M = cv2.moments(sorted_contours[i])
+        # get teh centroids of the two largest contours
+        for i in range(len(top_2_contours)):
+            M = cv2.moments(top_2_contours[i])
             if M["m00"] == 0:
                 return
             centroids.append(int(M["m10"] / M["m00"]))
-            y_offset = IMAGE_HEIGHT - CROP_AMOUNT
-            # cv2.drawContours(cv_image, [sorted_contours[i]], -1, (0, 255, 0), 2)
-        error = centroids[0] - centroids[1]
-
-        # cv2.circle(cv_image, (centroids[0], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
-        # cv2.circle(cv_image, (centroids[1], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
         
-        cv2.imshow("Desert Mask", mask)
+        if centroids[0] < IMAGE_WIDTH//2 and centroids[1] < IMAGE_WIDTH//2:
+            lost_right = True
+        elif centroids[0] > IMAGE_WIDTH//2 and centroids[1] > IMAGE_WIDTH//2:
+            lost_left = True
+
+        # positive means the car should turn left
+        error = IMAGE_WIDTH/2 - np.mean(centroids)
+
+        if lost_left:  # This will bias the car to the left if the left side is lost
+            error = LOSS_FACTOR
+            # write onto image
+            cv2.putText(
+                cv_image,
+                "Lost LEFT",
+                (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+        if lost_right:
+            error = -LOSS_FACTOR
+            # write onto image
+            cv2.putText(
+                cv_image,
+                "Lost RIGHT",
+                (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+        cv2.circle(cv_image, (centroids[0], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
+        cv2.circle(cv_image, (centroids[1], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
+        cv2.circle(cv_image, (IMAGE_WIDTH//2, IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 255, 0), -1)
+        cv2.circle(cv_image, (int(np.mean(centroids)), IMAGE_HEIGHT - CROP_AMOUNT), 5, (255, 0, 0), -1)
+        
+        # cv2.imshow("Desert Mask", mask)
         cv2.imshow("Desert Image", cv_image)
         cv2.waitKey(3)
 
         # PID controller
         move = Twist()
 
-        # print("Desert error", error)
-        # derivative = error - self.previous_error
-        # self.previous_error = error
+        print("Desert error", error)
+        derivative = error - self.previous_error
+        self.previous_error = error
 
-        # move.angular.z = -(KP * error + KD * derivative)
-        # print("Desert angular speed:", move.angular.z)
+        move.angular.z = (0.4*KP * error + KD * derivative)
+        print("Desert angular speed:", move.angular.z)
 
-        # move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
-        # print("Desert linear speed:", move.linear.x)
+        move.linear.x = max(0, 0.3 - SPEED_DROP * abs(error))
+        print("Desert linear speed:", move.linear.x)
 
-        if count == 0:
-            move.linear.x = 0.0
-            move.angular.z = 0.0
-            self.move_pub.publish(move)
-            count = 1
-        # self.move_pub.publish(move)
+        # if count == 0:
+        #     move.linear.x = 0.0
+        #     move.angular.z = 0.0
+        #     self.move_pub.publish(move)
+        #     count = 1
+        self.move_pub.publish(move)
+
+
+    def process_image(self, image):
+        # Read the image
+
+        mask = cv2.inRange(image, LOWER_DIRT, UPPER_DIRT)
+
+        # contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # cv2.drawContours(image, contours, -1, (0, 255, 0), 3)
+
+        # Define a kernel (structuring element)
+        kernel = np.ones((3, 3), np.uint8)
+
+        dilated_image = cv2.dilate(mask, kernel, iterations=1)
+
+        # Perform erosion
+        eroded_image = cv2.erode(dilated_image, kernel, iterations=2)
+        # cv2.imshow('Eroded Image', eroded_image)
+
+        # Perform dilation
+        dilated_image = cv2.dilate(eroded_image, kernel, iterations=8)
+
+        dilate_contours, _ = cv2.findContours(dilated_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        dilate_contours = sorted(dilate_contours, key=cv2.contourArea, reverse=True)
+
+        top_two_contours = dilate_contours[:2]
+
+        return top_two_contours 
 
     def spawn_position(self, position):
         msg = ModelState()
