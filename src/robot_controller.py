@@ -145,6 +145,7 @@ class topic_publisher:
         self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
         self.running = True
         self.spawn_position(HOME)
+        print("Done init")
 
     def clock_callback(self, data):
         """Callback for the clock subscriber
@@ -165,21 +166,24 @@ class topic_publisher:
         print()
         cv_image = self.set_state(data) 
 
-        action = self.state.choose_action()
+        print("state:", self.state.current_state)
+
+        # action = self.state.choose_action()
+        action = State.Action.DRIVE
 
         # for debugging
-        state_list = {0b00000001:"DRIVING", 0b00000010:"PINK", 0b00000100:"RED", 0b00001000:"CLUE", 0b00010000:"PINK_ON"}
-        print("location:", self.state.current_location)
-        cv2.putText(
-            cv_image,
-            str(self.state.current_state),
-            (1000, 50),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 0, 255),
-            2,
-            cv2.LINE_AA,
-        )
+        # state_list = {0b00000001:"DRIVING", 0b00000010:"PINK", 0b00000100:"RED", 0b00001000:"CLUE", 0b00010000:"PINK_ON"}
+        # print("location:", self.state.current_location)
+        # cv2.putText(
+        #     cv_image,
+        #     str(self.state.current_state),
+        #     (1000, 50),
+        #     cv2.FONT_HERSHEY_SIMPLEX,
+        #     1,
+        #     (0, 0, 255),
+        #     2,
+        #     cv2.LINE_AA,
+        # )
 
         if (action == State.Action.EXPLODE):  # TODO: shut down the script? - may not even need this state once this is implemented
             self.move_pub.publish(Twist())
@@ -235,7 +239,8 @@ class topic_publisher:
         state = 0b00000000
 
         if not self.running:
-            return -1, None
+            print("NOT RUNNING")
+            return cv_image
         
         if red_pixel_count > RED_THRESHOLD:
             state |= self.state.RED
@@ -653,6 +658,7 @@ class topic_publisher:
         clue = ""
         type = ""
         for i in range(len(clue_letter_imgs)):
+            print(clue_letter_imgs[i].shape)
             # the prediction is a list of probabilities for each letter and number
             # indices 0 to 25 are letters, 26 to 35 are numbers
             letter_aug = np.expand_dims(clue_letter_imgs[i], axis=0)
@@ -765,8 +771,8 @@ class topic_publisher:
         move = Twist()
         move.angular.z = 0.0
         move.linear.x = 0.1
-        while time.time() - start_time < 3:
-            self.move_pub.publish(move)
+        # while time.time() - start_time < 3:
+            # self.move_pub.publish(move)
 
 
 def main(args):
