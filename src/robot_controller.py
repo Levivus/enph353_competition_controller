@@ -29,8 +29,6 @@ import tensorflow as tf
 # from tensorflow.keras import backend
 
 
-
-
 TEAM_NAME = "MchnEarn"
 PASSWORD = "pswd"
 END_TIME = 5000000
@@ -43,6 +41,7 @@ IMAGE_DEPTH = 3
 # IMAGE MANIPULATION CONSTANTS
 CROP_AMOUNT = 250
 LOSS_FACTOR = 200
+RESPAWN_THRESHOLD = 10
 LOWER_PINK = np.array([200, 0, 200], dtype=np.uint8)
 UPPER_PINK = np.array([255, 150, 255], dtype=np.uint8)
 PINK_THRESHOLD = 100000
@@ -57,6 +56,7 @@ UPPER_DIRT = np.array([186, 220, 228], dtype=np.uint8)
 # PID CONSTANTS
 KP = 0.017
 KD = 0.003
+DKP = 0.4 # desert KP, multiplies KP
 MAX_SPEED = 0.3
 SPEED_DROP = 0.00055
 
@@ -70,7 +70,6 @@ ABSOLUTE_PATH = "/home/fizzer/ros_ws/src/enph353_competition_controller/src/"
 # multiple driving states (depending on location), a pedestrian stop state,
 # a clue state, etc.
 class State:
-
     class Location(Enum):
         ROAD = 0
         OFFROAD = 1
@@ -82,8 +81,10 @@ class State:
         CRY = 1
         RESPAWN = 2
         EXPLODE = 3
+        SIT = 4
 
     # Make state bitfield, so that multiple states can be active at once
+    NOTHING = 0b00000000
     DRIVING = 0b00000001
     PINK = 0b00000010
     RED = 0b00000100
@@ -97,23 +98,32 @@ class State:
         # Define the initial state
         self.location_count = 0
         self.current_location = self.LOCATIONS[self.location_count]
-        self.last_state = self.DRIVING
+        self.last_state = self.NOTHING
         self.last_pink_time = 0
-        self.current_state = self.DRIVING
         self.best_clue = np.zeros((IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_DEPTH), dtype=np.uint8)
         self.clue_improved_time = 500
         self.max_area = 0
+        self.current_state = self.NOTHING
+    
+    def set_location(self, location):
+        self.current_location = location
+        self.location_count = self.LOCATIONS.index(location)
 
     def choose_action(self):
-        if self.current_state & self.PINK:
-            if self.current_state & self.PINK_ON and time.time() - self.last_pink_time > 5:
+        if self.current_state & self.NOTHING:
+            return self.Action.SIT
+        elif self.current_state & self.PINK:
+            if (
+                self.current_state & self.PINK_ON
+                and time.time() - self.last_pink_time > 5
+            ):
                 self.last_pink_time = time.time()
                 self.current_state &= ~self.PINK_ON
                 self.location_count += 1
                 self.current_location = self.LOCATIONS[self.location_count]
-            # elif time.time() - self.last_pink_time > 5:
-            #     self.location_count += 1
-            #     self.current_location = self.LOCATIONS[self.location_count]
+                # elif time.time() - self.last_pink_time > 5:
+                #     self.location_count += 1
+                #     self.current_location = self.LOCATIONS[self.location_count]
                 return self.Action.DRIVE
         elif self.current_state & self.RED:
             return self.Action.RESPAWN
@@ -121,7 +131,7 @@ class State:
             return self.Action.DRIVE
         # Based on the current state, choose an action to take
         # This will be where the priority of states is implemented
-    
+
 
 class topic_publisher:
     def __init__(self):
@@ -130,7 +140,7 @@ class topic_publisher:
         self.state = State()
         self.letter_model = tf.keras.models.load_model(ABSOLUTE_PATH + "clue_model.h5", compile=False)
         self.previous_error = -100
-        self.image_count = 0
+        self.count = 0
         self.image_sub = rospy.Subscriber(
             "R1/pi_camera/image_raw", Image, self.callback
         )
@@ -151,9 +161,6 @@ class topic_publisher:
         """Callback for the clock subscriber
         Publishes the score to the score tracker node when the competition ends
         """
-        # if self.image_difference < 7000:
-        #     self.spawn_position(HOME)
-        #     print("Respawned")
         if self.running and data.clock.secs - self.time_start > END_TIME:
             self.running = False
             self.score_pub.publish("%s,%s,-1,NA" % (TEAM_NAME, PASSWORD))
@@ -171,30 +178,36 @@ class topic_publisher:
         # action = self.state.choose_action()
         action = State.Action.DRIVE
 
-        # for debugging
-        # state_list = {0b00000001:"DRIVING", 0b00000010:"PINK", 0b00000100:"RED", 0b00001000:"CLUE", 0b00010000:"PINK_ON"}
-        # print("location:", self.state.current_location)
-        # cv2.putText(
-        #     cv_image,
-        #     str(self.state.current_state),
-        #     (1000, 50),
-        #     cv2.FONT_HERSHEY_SIMPLEX,
-        #     1,
-        #     (0, 0, 255),
-        #     2,
-        #     cv2.LINE_AA,
-        # )
+        print("State:", self.state.current_state)
+        print("Action:", action)
+        print("Location:", self.state.current_location)
 
-        if (action == State.Action.EXPLODE):  # TODO: shut down the script? - may not even need this state once this is implemented
+        if (
+            action == State.Action.EXPLODE
+        ):  # TODO: shut down the script? - may not even need this state once this is implemented
             self.move_pub.publish(Twist())
             return
 
-        # new_image = np.array(cv_image)
-        # self.image_difference = cv2.norm(self.last_image, new_image, cv2.NORM_L2)
+        if self.running:
+            new_image = np.array(cv_image)
+            self.image_difference = np.mean((new_image - self.last_image) ** 2 )
+            print("Image difference:", self.image_difference)
+            if self.image_difference < RESPAWN_THRESHOLD:
+                self.spawn_position(HOME)
+                self.state.current_state = self.state.DRIVING
+                self.state.set_location(State.Location.ROAD)
+                print("Respawned")
+            self.last_image = new_image
 
-        if action == State.Action.DRIVE and self.state.current_location == State.Location.ROAD:
+        if (
+            action == State.Action.DRIVE
+            and self.state.current_location == State.Location.ROAD
+        ):
             self.driving(cv_image)
-        elif action == State.Action.DRIVE and self.state.current_location == State.Location.OFFROAD:
+        elif (
+            action == State.Action.DRIVE
+            and self.state.current_location == State.Location.OFFROAD
+        ):
             self.offroad_driving(cv_image)
 
         # elif action == State.Action.CRY:
@@ -204,12 +217,12 @@ class topic_publisher:
         #     # TODO: implement desert state
         #     self.driving(cv_image)
 
-        self.last_image = np.array(cv_image)
-
     def set_state(self, data):
         """Returns the current state of the robot, based on the image data
         Based on what the state will be, new data may be returned as well
         """
+        if not self.running:
+            return -1, None
         try:
             cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
         except CvBridgeError as e:
@@ -237,10 +250,6 @@ class topic_publisher:
 
         # Create a local state that will be added by bitwise OR
         state = 0b00000000
-
-        if not self.running:
-            print("NOT RUNNING")
-            return cv_image
         
         if red_pixel_count > RED_THRESHOLD:
             state |= self.state.RED
@@ -249,12 +258,12 @@ class topic_publisher:
             state |= self.state.PINK
             if (self.state.last_state & self.state.PINK) == 0:
                 state |= self.state.PINK_ON
-                
+
         state |= self.state.DRIVING
 
         self.state.last_state = self.state.current_state
         self.state.current_state = state
-        
+
         print("state:", self.state.current_state)
         return cv_image
 
@@ -296,6 +305,7 @@ class topic_publisher:
         else:  # no contours detected, so set error directly
             error = -IMAGE_WIDTH / 2 if self.previous_error < 0 else IMAGE_WIDTH / 2
 
+        # TODO: smooth this out, so when it's lost it doesnt jerk
         if lost_left:  # This will bias the car to the left if the left side is lost
             error = -LOSS_FACTOR
             # write onto image
@@ -308,15 +318,14 @@ class topic_publisher:
                 (0, 0, 255),
                 2,
                 cv2.LINE_AA,
-            )        
+            )
 
         cv2.imshow("Driving Image", cv_image)
-        # cv2.imshow("Mask", mask)
         cv2.waitKey(3)
 
         # PID controller
         move = Twist()
-
+        
         print("Road error", error)
         derivative = error - self.previous_error
         self.previous_error = error
@@ -331,45 +340,33 @@ class topic_publisher:
         self.move_pub.publish(move)
 
     def offroad_driving(self, cv_image):
-        print("desert driving")
-        count = 0
         lost_left = False
         lost_right = False
         contour_colour = (0, 0, 255)
-
-        # if self.image_count % 10 == 0:
-        #     image_filename = f"image_{self.image_count//10}.png"
-        #     image_path = os.path.join("/home/fizzer/ros_ws/src/enph353_competition_controller/image_testing/driving_images/", image_filename)
-        #     cv2.imwrite(image_path, cv_image)
-        #     rospy.loginfo(f"Saved image: {image_path}")
-
-        # self.image_count += 1
-
-        # mask = cv2.inRange(cv_image, LOWER_DIRT, UPPER_DIRT)
-        # contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # Sort contours based on area in descending order
-        # sorted_contours = sorted(contours, key=cv2.contourArea, reverse=True)
 
         top_2_contours = self.process_image(cv_image)
         cv2.drawContours(cv_image, top_2_contours, -1, contour_colour, 2)
 
         centroids = []
-        # get teh centroids of the two largest contours
-        for i in range(len(top_2_contours)):
-            M = cv2.moments(top_2_contours[i])
-            if M["m00"] == 0:
-                return
-            centroids.append(int(M["m10"] / M["m00"]))
-        
-        if centroids[0] < IMAGE_WIDTH//2 and centroids[1] < IMAGE_WIDTH//2:
-            lost_right = True
-        elif centroids[0] > IMAGE_WIDTH//2 and centroids[1] > IMAGE_WIDTH//2:
-            lost_left = True
+        if len(top_2_contours) != 0:
+        # get the centroids of the two largest contours
+            for i in range(len(top_2_contours)):
+                M = cv2.moments(top_2_contours[i])
+                if M["m00"] == 0:
+                    return
+                centroids.append(int(M["m10"] / M["m00"]))
 
-        # positive means the car should turn left
-        error = IMAGE_WIDTH/2 - np.mean(centroids)
+            if centroids[0] < IMAGE_WIDTH // 2 and centroids[1] < IMAGE_WIDTH // 2:
+                lost_right = True
+            elif centroids[0] > IMAGE_WIDTH // 2 and centroids[1] > IMAGE_WIDTH // 2:
+                lost_left = True
 
+            # positive means the car should turn left
+            error = IMAGE_WIDTH / 2 - np.mean(centroids)
+        else:
+            error = -IMAGE_WIDTH / 2 if self.previous_error < 0 else IMAGE_WIDTH / 2
+
+        # TODO: maybe smooth this out? might not need it idk
         if lost_left:  # This will bias the car to the left if the left side is lost
             error = LOSS_FACTOR
             # write onto image
@@ -397,11 +394,26 @@ class topic_publisher:
                 cv2.LINE_AA,
             )
 
-        cv2.circle(cv_image, (centroids[0], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
-        cv2.circle(cv_image, (centroids[1], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1)
-        cv2.circle(cv_image, (IMAGE_WIDTH//2, IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 255, 0), -1)
-        cv2.circle(cv_image, (int(np.mean(centroids)), IMAGE_HEIGHT - CROP_AMOUNT), 5, (255, 0, 0), -1)
-        
+        # red circles showing the centroids
+        cv2.circle(
+            cv_image, (centroids[0], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1
+        )
+        cv2.circle(
+            cv_image, (centroids[1], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1
+        )
+        # green circle showing the middle of the image
+        cv2.circle(
+            cv_image, (IMAGE_WIDTH // 2, IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 255, 0), -1
+        )
+        # blue circle showing the mean of the centroids
+        cv2.circle(
+            cv_image,
+            (int(np.mean(centroids)), IMAGE_HEIGHT - CROP_AMOUNT),
+            5,
+            (255, 0, 0),
+            -1,
+        )
+
         # cv2.imshow("Desert Mask", mask)
         cv2.imshow("Desert Image", cv_image)
         cv2.waitKey(3)
@@ -413,48 +425,40 @@ class topic_publisher:
         derivative = error - self.previous_error
         self.previous_error = error
 
-        move.angular.z = (0.4*KP * error + KD * derivative)
+        move.angular.z = DKP * KP * error + KD * derivative
         print("Desert angular speed:", move.angular.z)
 
-        move.linear.x = max(0, 0.3 - SPEED_DROP * abs(error))
+        move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
         print("Desert linear speed:", move.linear.x)
 
-        # if count == 0:
-        #     move.linear.x = 0.0
-        #     move.angular.z = 0.0
-        #     self.move_pub.publish(move)
-        #     count = 1
         self.move_pub.publish(move)
 
-
+    # TODO: make this more efficient/ more reliable
     def process_image(self, image):
-        # Read the image
-
+        # mask the image
         mask = cv2.inRange(image, LOWER_DIRT, UPPER_DIRT)
-
-        # contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # cv2.drawContours(image, contours, -1, (0, 255, 0), 3)
 
         # Define a kernel (structuring element)
         kernel = np.ones((3, 3), np.uint8)
 
+        # Perform 1st dilation
         dilated_image = cv2.dilate(mask, kernel, iterations=1)
 
         # Perform erosion
         eroded_image = cv2.erode(dilated_image, kernel, iterations=2)
-        # cv2.imshow('Eroded Image', eroded_image)
 
-        # Perform dilation
+        # Perform 2nd dilation
         dilated_image = cv2.dilate(eroded_image, kernel, iterations=8)
 
-        dilate_contours, _ = cv2.findContours(dilated_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        dilate_contours, _ = cv2.findContours(
+            dilated_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
 
         dilate_contours = sorted(dilate_contours, key=cv2.contourArea, reverse=True)
 
         top_two_contours = dilate_contours[:2]
 
-        return top_two_contours 
+        return top_two_contours
 
     def spawn_position(self, position):
         msg = ModelState()
@@ -739,32 +743,9 @@ class topic_publisher:
 
         return top_right, bottom_right, bottom_left, top_left
 
-    def find_corner_points(self, contour):
-        """Finds the corner points of a contour
-        Returns a list of the corner points
-        """
-        top_left = min(
-            filter(
-                lambda p: p[0][1] == min(contour, key=lambda x: x[0][1])[0][1], contour
-            ),
-            key=lambda x: x[0][0],
-        )
-        bottom_left = min(
-            filter(
-                lambda p: p[0][1] == max(contour, key=lambda x: x[0][1])[0][1], contour
-            ),
-            key=lambda x: x[0][0],
-        )
-        bottom_right = max(contour, key=lambda point: (point[0][0] + point[0][1]))
-        top_right = max(
-            filter(
-                lambda p: p[0][1] == min(contour, key=lambda x: x[0][1])[0][1], contour
-            ),
-            key=lambda x: x[0][0],
-        )
 
-        return bottom_left, top_left, bottom_right, top_right
 
+    # TODO: Implement this when we figure out what to do/ if we figure it out...
     def pedestrian(self, cv_image):
         """Function for the PEDESTRIAN state"""
         start_time = time.time()

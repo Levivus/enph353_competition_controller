@@ -1,8 +1,14 @@
 import cv2
 import numpy as np
+    
+"""
+This script uses erosion and dilation to remove noise from the image. It worked well,
+and was implemented in the actual controller. This script serves to test images just with 
+erosion and dilation. Additional erosion and dilation steps may be added.
+"""
 
 # Read the image
-image = cv2.imread('hsv_threshold.png', cv2.IMREAD_GRAYSCALE)
+image = cv2.imread('bgr_thresholded.png', cv2.IMREAD_GRAYSCALE)
 
 # Define a kernel (structuring element)
 kernel = np.ones((3, 3), np.uint8)
