@@ -1,8 +1,14 @@
 import cv2
 import numpy as np
 
+"""
+This script was written by ChatGPT when prompt with the overachring problem
+of detecting lines that blended with the background. The script uses a variety of methods,
+most interstingly, it uses lines and edges. This did not work well, but have have potential.
+"""
+
 # Read the image
-image = cv2.imread('test1dirt.png')  # Replace with your image path
+image = cv2.imread('offroad_test_image1.png')  # Replace with your image path
 original_image = image.copy()
 
 # Convert the image to grayscale

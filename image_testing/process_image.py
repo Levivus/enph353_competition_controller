@@ -1,14 +1,16 @@
 import cv2
 import numpy as np
 import os
+"""Image processing script
+This is the function used in the controller to process the images in the offroad location. It can
+be used to test individual images and show them in a for loop at the bottom, to get a clearer idea
+of what it's doing, and potentially how it can be improved.
+"""
 
 LOWER_DIRT = np.array([140, 164, 168], dtype=np.uint8)
 UPPER_DIRT = np.array([186, 220, 228], dtype=np.uint8)
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-# Specify the relative path to the image in the driving_images folder
-image_path = os.path.join(script_dir, 'driving_images', 'image_330.png')
-
 
 def process_image(image):
     # Read the image

@@ -4,14 +4,12 @@ import numpy as np
 import cv2 as cv
 import time
 
-img = cv.imread('test1dirt.png',cv.IMREAD_COLOR)
-# img = cv.imread('test2.png',cv.IMREAD_COLOR)
-# img = cv.imread('test3.png',cv.IMREAD_COLOR)
+"""Script for calibrating the BGR threshold
+This was the script provided by Miti. It was orginally used for HSV thresholding, but
+I modified it to work with BGR thresholding.
+"""
 
-# img = cv.medianBlur(img,5)
-
-# Convert BGR to HSV
-# hsv = cv.cvtColor(img, cv.COLOR_BGR2HSV)
+img = cv.imread('offroad_test_image1.png',cv.IMREAD_COLOR)
 
 ub = 186
 ug = 220
@@ -79,7 +77,7 @@ while(1):
 
     # save the image when i hit a buttom that says save
     if k == ord('s'):
-        cv.imwrite('hsv_threshold.png',mask)
+        cv.imwrite('bgr_thresholded.png',mask)
         break
 
     time.sleep(.1)
