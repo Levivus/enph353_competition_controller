@@ -59,7 +59,7 @@ UPPER_DIRT = np.array([186, 220, 228], dtype=np.uint8)
 KP = 0.017
 KD = 0.003
 DKP = 0.4 # desert KP, multiplies KP
-MAX_SPEED = 0.3
+MAX_SPEED = 0.4
 SPEED_DROP = 0.00055
 
 CLUE_TYPES = {"SIZE": 1, "VICTIM": 2, "CRIME": 3, "TIME": 4, "PLACE": 5, "MOTIVE": 6, "WEAPON": 7, "BANDIT": 8}
@@ -249,19 +249,17 @@ class topic_publisher:
         # Pink
         pink_mask = cv2.inRange(cv_image, LOWER_PINK, UPPER_PINK)
         pink_pixel_count = cv2.countNonZero(pink_mask)
-        # print("Pink pixel count:", pink_pixel_count)
+        print("Pink pixel count:", pink_pixel_count)
         # Red
         # red_mask = cv2.inRange(cv_image, LOWER_RED, UPPER_RED)
         # red_pixel_count = cv2.countNonZero(red_mask)
         # print("Red pixel count:", red_pixel_count)
 
-        if self.obstacle_detection(cv_image):
-            state |= self.state.OBSTACLE
         # Create a local state that will be added by bitwise OR
         state = 0b00000000
-        
-        # if red_pixel_count > RED_THRESHOLD:
-        #     state |= self.state.RED
+
+        if self.obstacle_detection(cv_image) and self.state.current_location == State.Location.ROAD:
+            state |= self.state.OBSTACLE
 
         if pink_pixel_count > PINK_THRESHOLD:
             state |= self.state.PINK
@@ -525,7 +523,6 @@ class topic_publisher:
         cv2.imshow("Frame pre-erode", frame)
         # Erode the image to remove artifacts
         frame = cv2.erode(frame, np.ones((3,3), np.uint8), iterations=2)
-        cv2.imshow("Frame post-erode", frame)
 
         # Apply background subtraction
         fgmask = self.fgbg.apply(frame)
@@ -543,13 +540,14 @@ class topic_publisher:
         if detected:
             print("OBSTACLE DETECTED")
         cv2.putText(frame, "OBSTACLE DETECTED"+str(detected), (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+        cv2.imshow("Frame post-erode", frame)
 
         return detected
 
 
         # TODO: Implement this when we figure out what to do/ if we figure it out...
    
-   # TODO: Implement this when we figure out what to do/ if we figure it out...
+   # TODO: Test this and prob do something better then stop? also only works for road rn, gets tripped up on offroad
     def avoid_obstacle(self):
         """Function for avoiding obsatcle"""
         start_time = time.time()
