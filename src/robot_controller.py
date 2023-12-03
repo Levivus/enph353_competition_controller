@@ -21,12 +21,7 @@ import os.path
 from os import path
 import inspect
 
-# from tensorflow.keras import layers
 import tensorflow as tf
-from tensorflow.keras import optimizers
-
-# from tensorflow.keras.utils import plot_model
-from tensorflow.keras import backend
 
 
 TEAM_NAME = "MchnEarn"
@@ -151,10 +146,11 @@ class topic_publisher:
         )
         time.sleep(1)
         self.move_pub.publish(Twist())
-        # LETTER MODEL
-        self.letter_model = tf.keras.models.load_model(ABSOLUTE_PATH + "clue_model.h5", compile=False)
-        backend.set_learning_phase(0) # Tell keras it will only be predicting, not training
-        self.letter_model.predict(np.zeros((1, 130, 80, 1), dtype=np.uint8)) # Run a prediction to initialize the model
+
+        self.lite_model = tf.lite.Interpreter(model_path=ABSOLUTE_PATH + "quantized_model.tflite")
+        self.lite_model.allocate_tensors()
+        self.input_details = self.lite_model.get_input_details()
+        self.output_details = self.lite_model.get_output_details()
 
         self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
         self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
@@ -235,7 +231,6 @@ class topic_publisher:
 
         # If the clue has not improved in 3 seconds, find the letters, and reset the max area
         if time.time() - self.state.clue_improved_time > 2:
-            print("CLUE IS GOOD")
             self.submit_clue()
             self.state.clue_improved_time = time.time()+300 # Set the time after comp, so it doesn't submit again
             self.state.max_area = 0
@@ -564,7 +559,6 @@ class topic_publisher:
         self.score_pub.publish("%s,%s,%d,%s" % (TEAM_NAME, PASSWORD, type_num, clue))
 
     def find_words(self):
-        print("\n\n\n\n\n\n\n\n\n\n\nFINDING WORDS")
         clue = self.state.best_clue
 
         cv2.imshow("Clue", clue)
@@ -665,21 +659,29 @@ class topic_publisher:
 
         letter_imgs = np.expand_dims(np.array(letter_imgs), axis=-1)
 
-        # Now that there are images, input them into the neural network to get the string
-        print("Found Letters, beginning prediction")
+        outputs = []
+
+        print("FOUND LETTERS, BEGINNING PREDICTION")
         start_time = time.time()
 
-        prediction_arrays = self.letter_model.predict(letter_imgs)
+        self.lite_model.resize_tensor_input(self.lite_model.get_input_details()[0]['index'], [len(letter_imgs), 130, 80, 1])
+        self.lite_model.allocate_tensors()
+    
+        self.lite_model.set_tensor(self.input_details[0]['index'], letter_imgs.astype(np.float32))
+        self.lite_model.invoke()
+            
+        outputs = self.lite_model.get_tensor(self.output_details[0]['index'])
+        outputs = np.array(outputs)
 
-        predicted_values = np.argmax(prediction_arrays, axis=1)
+        print("Prediction time:", time.time() - start_time)
+
+        predicted_values = np.argmax(outputs, axis=1)
         # turn the predicted values into the characters/numbers
         predicted_values = [chr(x+65) if x < 26 else str(x-26) for x in predicted_values]
         predicted_values = "".join(predicted_values)
 
         type = predicted_values[:len(typeBoundingBoxes)]
         clue = predicted_values[len(typeBoundingBoxes):]
-
-        print("Completed Prediction. Took " + str(time.time()-start_time) + " seconds")
 
         return type, clue
 
