@@ -43,7 +43,7 @@ OBSTACLE_THRESHOLD = 1000
 # IMAGE MANIPULATION CONSTANTS
 CROP_AMOUNT = 250
 LOSS_FACTOR = 200
-RESPAWN_THRESHOLD = 10
+RESPAWN_THRESHOLD = 5
 LOWER_PINK = np.array([200, 0, 200], dtype=np.uint8)
 UPPER_PINK = np.array([255, 150, 255], dtype=np.uint8)
 PINK_THRESHOLD = 100000
@@ -365,7 +365,7 @@ class topic_publisher:
         cv2.drawContours(cv_image, top_2_contours, -1, contour_colour, 2)
 
         centroids = []
-        if len(top_2_contours) != 0:
+        if len(top_2_contours) > 1:
         # get the centroids of the two largest contours
             for i in range(len(top_2_contours)):
                 M = cv2.moments(top_2_contours[i])
@@ -411,25 +411,26 @@ class topic_publisher:
                 cv2.LINE_AA,
             )
 
-        # red circles showing the centroids
-        cv2.circle(
-            cv_image, (centroids[0], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1
-        )
-        cv2.circle(
-            cv_image, (centroids[1], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1
-        )
-        # green circle showing the middle of the image
-        cv2.circle(
-            cv_image, (IMAGE_WIDTH // 2, IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 255, 0), -1
-        )
-        # blue circle showing the mean of the centroids
-        cv2.circle(
-            cv_image,
-            (int(np.mean(centroids)), IMAGE_HEIGHT - CROP_AMOUNT),
-            5,
-            (255, 0, 0),
-            -1,
-        )
+        if len(top_2_contours) > 1:
+            # red circles showing the centroids
+            cv2.circle(
+                cv_image, (centroids[0], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1
+            )
+            cv2.circle(
+                cv_image, (centroids[1], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1
+            )
+            # green circle showing the middle of the image
+            cv2.circle(
+                cv_image, (IMAGE_WIDTH // 2, IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 255, 0), -1
+            )
+            # blue circle showing the mean of the centroids
+            cv2.circle(
+                cv_image,
+                (int(np.mean(centroids)), IMAGE_HEIGHT - CROP_AMOUNT),
+                5,
+                (255, 0, 0),
+                -1,
+            )
 
         # cv2.imshow("Desert Mask", mask)
         cv2.imshow("Desert Image", cv_image)
@@ -519,9 +520,9 @@ class topic_publisher:
 
         # apply masks for raod lines and white
         frame = cv2.erode(frame, np.ones((3,3), np.uint8), iterations=2)
-        mask = cv2.inRange(frame, 75, 115)
+        mask = cv2.inRange(frame, 70, 115)
         frame[mask>0] = [82]
-        mask = cv2.inRange(frame, 250, 255)
+        mask = cv2.inRange(frame, 200, 255)
         frame[mask>0] = [82]
 
         cv2.imshow("Frame pre-erode", frame)
@@ -543,8 +544,9 @@ class topic_publisher:
         print("pixel count:", pixel_count)
         if pixel_count > OBSTACLE_THRESHOLD:
             print("OBSTACLE DETECTED")
+            cv2.putText(frame, "OBSTACLE DETECTED", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
 
-        cv2.imshow("segmented image", segmented_image)
+        cv2.imshow("Segmented image", segmented_image)
         return False
 
     # def update_clue(self, cv_image):
