@@ -23,10 +23,10 @@ import inspect
 
 # from tensorflow.keras import layers
 import tensorflow as tf
-# from tensorflow.keras import optimizers
+from tensorflow.keras import optimizers
 
 # from tensorflow.keras.utils import plot_model
-# from tensorflow.keras import backend
+from tensorflow.keras import backend
 
 
 TEAM_NAME = "MchnEarn"
@@ -101,7 +101,7 @@ class State:
         self.last_state = self.NOTHING
         self.last_pink_time = 0
         self.best_clue = np.zeros((IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_DEPTH), dtype=np.uint8)
-        self.clue_improved_time = 500
+        self.clue_improved_time = time.time() + 500
         self.max_area = 0
         self.current_state = self.NOTHING
     
@@ -138,7 +138,6 @@ class topic_publisher:
         self.running = False  # Prevent callback from running before competition starts
         self.bridge = CvBridge()
         self.state = State()
-        self.letter_model = tf.keras.models.load_model(ABSOLUTE_PATH + "clue_model.h5", compile=False)
         self.previous_error = -100
         self.count = 0
         self.image_sub = rospy.Subscriber(
@@ -151,6 +150,12 @@ class topic_publisher:
             (IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_DEPTH), dtype=np.uint8
         )
         time.sleep(1)
+        self.move_pub.publish(Twist())
+        # LETTER MODEL
+        self.letter_model = tf.keras.models.load_model(ABSOLUTE_PATH + "clue_model.h5", compile=False)
+        backend.set_learning_phase(0) # Tell keras it will only be predicting, not training
+        self.letter_model.predict(np.zeros((1, 130, 80, 1), dtype=np.uint8)) # Run a prediction to initialize the model
+
         self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
         self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
         self.running = True
@@ -170,17 +175,14 @@ class topic_publisher:
         Calls the appropriate function based on the state of the robot
         This is the main logic loop of the robot
         """
-        print()
+        
         cv_image = self.set_state(data) 
 
-        print("state:", self.state.current_state)
+        action = self.state.choose_action()
 
-        # action = self.state.choose_action()
-        action = State.Action.DRIVE
-
-        print("State:", self.state.current_state)
-        print("Action:", action)
-        print("Location:", self.state.current_location)
+        # print("State:", self.state.current_state)
+        # print("Action:", action)
+        # print("Location:", self.state.current_location)
 
         if (
             action == State.Action.EXPLODE
@@ -191,7 +193,7 @@ class topic_publisher:
         if self.running:
             new_image = np.array(cv_image)
             self.image_difference = np.mean((new_image - self.last_image) ** 2 )
-            print("Image difference:", self.image_difference)
+            # print("Image difference:", self.image_difference)
             if self.image_difference < RESPAWN_THRESHOLD:
                 self.spawn_position(HOME)
                 self.state.current_state = self.state.DRIVING
@@ -233,6 +235,7 @@ class topic_publisher:
 
         # If the clue has not improved in 3 seconds, find the letters, and reset the max area
         if time.time() - self.state.clue_improved_time > 2:
+            print("CLUE IS GOOD")
             self.submit_clue()
             self.state.clue_improved_time = time.time()+300 # Set the time after comp, so it doesn't submit again
             self.state.max_area = 0
@@ -242,11 +245,11 @@ class topic_publisher:
         # Pink
         pink_mask = cv2.inRange(cv_image, LOWER_PINK, UPPER_PINK)
         pink_pixel_count = cv2.countNonZero(pink_mask)
-        print("Pink pixel count:", pink_pixel_count)
+        # print("Pink pixel count:", pink_pixel_count)
         # Red
         red_mask = cv2.inRange(cv_image, LOWER_RED, UPPER_RED)
         red_pixel_count = cv2.countNonZero(red_mask)
-        print("Red pixel count:", red_pixel_count)
+        # print("Red pixel count:", red_pixel_count)
 
         # Create a local state that will be added by bitwise OR
         state = 0b00000000
@@ -264,7 +267,7 @@ class topic_publisher:
         self.state.last_state = self.state.current_state
         self.state.current_state = state
 
-        print("state:", self.state.current_state)
+        # print("state:", self.state.current_state)
         return cv_image
 
     def driving(self, cv_image):
@@ -326,16 +329,16 @@ class topic_publisher:
         # PID controller
         move = Twist()
         
-        print("Road error", error)
+        # print("Road error", error)
         derivative = error - self.previous_error
         self.previous_error = error
 
         move.angular.z = -(KP * error + KD * derivative)
-        print("Road angular speed:", move.angular.z)
+        # print("Road angular speed:", move.angular.z)
 
         # decrease linear speed as angular speed increases from a max of 3 down to 1.xx? if abs(error) > 400
         move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
-        print("Road linear speed:", move.linear.x)
+        # print("Road linear speed:", move.linear.x)
 
         self.move_pub.publish(move)
 
@@ -421,15 +424,15 @@ class topic_publisher:
         # PID controller
         move = Twist()
 
-        print("Desert error", error)
+        # print("Desert error", error)
         derivative = error - self.previous_error
         self.previous_error = error
 
         move.angular.z = DKP * KP * error + KD * derivative
-        print("Desert angular speed:", move.angular.z)
+        # print("Desert angular speed:", move.angular.z)
 
         move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
-        print("Desert linear speed:", move.linear.x)
+        # print("Desert linear speed:", move.linear.x)
 
         self.move_pub.publish(move)
 
@@ -528,7 +531,7 @@ class topic_publisher:
                 # Template that the clue will be warped onto
                 clue = np.zeros((400, 600, 3), np.uint8)
 
-                top_right, bottom_right, bottom_left, top_left = self.find_corner_points(clue_border)
+                top_right, bottom_right, bottom_left, top_left = self.find_clue_corners(clue_border)
 
                 input_pts = np.float32([top_right, bottom_right, bottom_left, top_left])
                 output_pts = np.float32([[clue.shape[1],0], [clue.shape[1],clue.shape[0]], [0,clue.shape[0]], [0,0]])
@@ -561,10 +564,11 @@ class topic_publisher:
         self.score_pub.publish("%s,%s,%d,%s" % (TEAM_NAME, PASSWORD, type_num, clue))
 
     def find_words(self):
+        print("\n\n\n\n\n\n\n\n\n\n\nFINDING WORDS")
         clue = self.state.best_clue
 
-        clue_letter_imgs = []
-        type_letter_imgs = []
+        cv2.imshow("Clue", clue)
+        cv2.waitKey(3)
 
         clue_plate = clue[200:395, 5:595].copy()
         type_plate = clue[5:200, 5:595].copy()
@@ -638,6 +642,8 @@ class topic_publisher:
         # Letter Template
         letter = np.zeros((130, 80, 3), np.uint8)
 
+        letter_imgs = []
+
         # For each rectangle (which is a letter), warp perspective to get the letter into the template
         for i in range(len(typeBoundingBoxes)):
             (x, y, w, h) = typeBoundingBoxes[i]
@@ -645,7 +651,8 @@ class topic_publisher:
             output_pts = np.float32([[letter.shape[1],0], [letter.shape[1],letter.shape[0]], [0,letter.shape[0]], [0,0]])
             matrix = cv2.getPerspectiveTransform(input_pts, output_pts)
             letter = cv2.warpPerspective(type_plate,matrix,(letter.shape[1], letter.shape[0]),flags=cv2.INTER_LINEAR)
-            type_letter_imgs.append(np.array(letter))
+            letter = cv2.cvtColor(letter, cv2.COLOR_BGR2GRAY)
+            letter_imgs.append(np.array(letter))
 
         for i in range(len(clueBoundingBoxes)):
             (x, y, w, h) = clueBoundingBoxes[i]
@@ -653,44 +660,26 @@ class topic_publisher:
             output_pts = np.float32([[letter.shape[1],0], [letter.shape[1],letter.shape[0]], [0,letter.shape[0]], [0,0]])
             matrix = cv2.getPerspectiveTransform(input_pts, output_pts)
             letter = cv2.warpPerspective(clue_plate,matrix,(letter.shape[1], letter.shape[0]),flags=cv2.INTER_LINEAR)
-            clue_letter_imgs.append(np.array(letter))
+            letter = cv2.cvtColor(letter, cv2.COLOR_BGR2GRAY)
+            letter_imgs.append(np.array(letter))
 
-        # Now that there are images, input each one into the neural network to get the letter
-        
-        # print whether the clue_model.keras file exists in the current directory
+        letter_imgs = np.expand_dims(np.array(letter_imgs), axis=-1)
 
-        clue = ""
-        type = ""
-        for i in range(len(clue_letter_imgs)):
-            print(clue_letter_imgs[i].shape)
-            # the prediction is a list of probabilities for each letter and number
-            # indices 0 to 25 are letters, 26 to 35 are numbers
-            letter_aug = np.expand_dims(clue_letter_imgs[i], axis=0)
-            prediction = self.letter_model.predict(letter_aug)[0]
-            # the index of the highest probability is the letter
-            letter_index = np.argmax(prediction)
+        # Now that there are images, input them into the neural network to get the string
+        print("Found Letters, beginning prediction")
+        start_time = time.time()
 
-            # if the letter is a number, subtract 26 to get number
-            if letter_index > 25:
-                clue += str(letter_index - 26)
-            # if the letter is a letter, add 65 to get ascii value
-            else:
-                clue += chr(letter_index + 65)
+        prediction_arrays = self.letter_model.predict(letter_imgs)
 
-        for i in range(len(type_letter_imgs)):
-            # the prediction is a list of probabilities for each letter and number
-            # indices 0 to 25 are letters, 26 to 35 are numbers
-            letter_aug = np.expand_dims(type_letter_imgs[i], axis=0)
-            prediction = self.letter_model.predict(letter_aug)[0]
-            # the index of the highest probability is the letter
-            letter_index = np.argmax(prediction)
+        predicted_values = np.argmax(prediction_arrays, axis=1)
+        # turn the predicted values into the characters/numbers
+        predicted_values = [chr(x+65) if x < 26 else str(x-26) for x in predicted_values]
+        predicted_values = "".join(predicted_values)
 
-            # if the letter is a number, subtract 26 to get number
-            if letter_index > 25:
-                type += str(letter_index - 26)
-            # if the letter is a letter, add 65 to get ascii value
-            else:
-                type += chr(letter_index + 65)
+        type = predicted_values[:len(typeBoundingBoxes)]
+        clue = predicted_values[len(typeBoundingBoxes):]
+
+        print("Completed Prediction. Took " + str(time.time()-start_time) + " seconds")
 
         return type, clue
 
