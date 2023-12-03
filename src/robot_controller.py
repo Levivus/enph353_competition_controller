@@ -522,7 +522,7 @@ class topic_publisher:
         frame = cv2.erode(frame, np.ones((3,3), np.uint8), iterations=2)
         mask = cv2.inRange(frame, 70, 115)
         frame[mask>0] = [82]
-        mask = cv2.inRange(frame, 200, 255)
+        mask = cv2.inRange(frame, 160, 255)
         frame[mask>0] = [82]
 
         cv2.imshow("Frame pre-erode", frame)

@@ -56,7 +56,7 @@ class topic_publisher:
             elif location == "p":
                 self.spawn_position([0.5, 0.0, 0.1, x, y, z, w])
             elif location == "t":
-                self.spawn_position([4.0, -1.5, 0.1, x, y, z, w])
+                self.spawn_position([4.0, -1.3, 0.1, x, y, z, w])
             elif user_input.lower() == "q":
                 rospy.signal_shutdown("User requested shutdown.")
 
