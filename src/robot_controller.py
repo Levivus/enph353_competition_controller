@@ -14,7 +14,7 @@ from gazebo_msgs.msg import ModelState
 from gazebo_msgs.srv import SetModelState
 import numpy as np
 
-import Levenshtein
+# import Levenshtein
 
 import os
 import os.path
@@ -23,10 +23,10 @@ import inspect
 
 # from tensorflow.keras import layers
 import tensorflow as tf
-from tensorflow.keras import optimizers
+# from tensorflow.keras import optimizers
 
 # from tensorflow.keras.utils import plot_model
-from tensorflow.keras import backend
+# from tensorflow.keras import backend
 
 
 TEAM_NAME = "MchnEarn"
@@ -37,6 +37,7 @@ DESERT_TEST = [0.5, -1.0, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
 IMAGE_HEIGHT = 720
 IMAGE_WIDTH = 1280
 IMAGE_DEPTH = 3
+OBSTACLE_FRAME_COUNT = 10
 
 # IMAGE MANIPULATION CONSTANTS
 CROP_AMOUNT = 250
@@ -47,7 +48,7 @@ UPPER_PINK = np.array([255, 150, 255], dtype=np.uint8)
 PINK_THRESHOLD = 100000
 LOWER_RED = np.array([0, 0, 200], dtype=np.uint8)
 UPPER_RED = np.array([100, 100, 255], dtype=np.uint8)
-RED_THRESHOLD = 10000
+RED_THRESHOLD = 60000
 LOWER_ROAD = np.array([0, 0, 78], dtype=np.uint8)
 UPPER_ROAD = np.array([125, 135, 255], dtype=np.uint8)
 LOWER_DIRT = np.array([140, 164, 168], dtype=np.uint8)
@@ -64,6 +65,7 @@ CLUE_TYPES = {"SIZE": 1, "VICTIM": 2, "CRIME": 3, "TIME": 4, "PLACE": 5, "MOTIVE
 
 PATH = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe()))) + "/"
 ABSOLUTE_PATH = "/home/fizzer/ros_ws/src/enph353_competition_controller/src/"
+CAPTURE_PATH = "/home/fizzer/ros_ws/src/enph353_competition_controller/image_testing/"
 
 
 # Some random states, will update later as needed for example, may have
@@ -78,18 +80,18 @@ class State:
 
     class Action(Enum):
         DRIVE = 0
-        CRY = 1
+        AVOID = 1
         RESPAWN = 2
         EXPLODE = 3
         SIT = 4
 
     # Make state bitfield, so that multiple states can be active at once
-    NOTHING = 0b00000000
-    DRIVING = 0b00000001
-    PINK = 0b00000010
-    RED = 0b00000100
-    CLUE = 0b00001000
-    PINK_ON = 0b00010000
+    NOTHING =  0b00000000
+    DRIVING =  0b00000001
+    PINK =     0b00000010
+    OBSTACLE = 0b00000100
+    CLUE =     0b00001000
+    PINK_ON =  0b00010000
 
     # location list
     LOCATIONS = [Location.ROAD, Location.OFFROAD, Location.DESERT, Location.MOUNTAIN]
@@ -110,7 +112,7 @@ class State:
         self.location_count = self.LOCATIONS.index(location)
 
     def choose_action(self):
-        if self.current_state & self.NOTHING:
+        if self.current_state & self.OBSTACLE:
             return self.Action.SIT
         elif self.current_state & self.PINK:
             if (
@@ -125,8 +127,8 @@ class State:
                 #     self.location_count += 1
                 #     self.current_location = self.LOCATIONS[self.location_count]
                 return self.Action.DRIVE
-        elif self.current_state & self.RED:
-            return self.Action.RESPAWN
+        elif self.current_state & self.OBSTACLE:
+            return self.Action.AVOID
         elif self.current_state & self.DRIVING:
             return self.Action.DRIVE
         # Based on the current state, choose an action to take
@@ -139,7 +141,9 @@ class topic_publisher:
         self.bridge = CvBridge()
         self.state = State()
         self.previous_error = -100
-        self.count = 0
+        self.frame_count = 0
+        self.frames = []
+
         self.image_sub = rospy.Subscriber(
             "R1/pi_camera/image_raw", Image, self.callback
         )
@@ -152,9 +156,9 @@ class topic_publisher:
         time.sleep(1)
         self.move_pub.publish(Twist())
         # LETTER MODEL
-        self.letter_model = tf.keras.models.load_model(ABSOLUTE_PATH + "clue_model.h5", compile=False)
-        backend.set_learning_phase(0) # Tell keras it will only be predicting, not training
-        self.letter_model.predict(np.zeros((1, 130, 80, 1), dtype=np.uint8)) # Run a prediction to initialize the model
+        # self.letter_model = tf.keras.models.load_model(ABSOLUTE_PATH + "clue_model.h5", compile=False)
+        # backend.set_learning_phase(0) # Tell keras it will only be predicting, not training
+        # self.letter_model.predict(np.zeros((1, 130, 80, 1), dtype=np.uint8)) # Run a prediction to initialize the model
 
         self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
         self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
@@ -177,7 +181,6 @@ class topic_publisher:
         """
         
         cv_image = self.set_state(data) 
-
         action = self.state.choose_action()
 
         # print("State:", self.state.current_state)
@@ -194,11 +197,11 @@ class topic_publisher:
             new_image = np.array(cv_image)
             self.image_difference = np.mean((new_image - self.last_image) ** 2 )
             # print("Image difference:", self.image_difference)
-            if self.image_difference < RESPAWN_THRESHOLD:
-                self.spawn_position(HOME)
-                self.state.current_state = self.state.DRIVING
-                self.state.set_location(State.Location.ROAD)
-                print("Respawned")
+            # if self.image_difference < RESPAWN_THRESHOLD:
+            #     self.spawn_position(HOME)
+            #     self.state.current_state = self.state.DRIVING
+            #     self.state.set_location(State.Location.ROAD)
+            #     print("Respawned")
             self.last_image = new_image
 
         if (
@@ -211,6 +214,10 @@ class topic_publisher:
             and self.state.current_location == State.Location.OFFROAD
         ):
             self.offroad_driving(cv_image)
+        elif action == State.Action.AVOID:
+            self.obstacle_avoidance(cv_image)
+        elif action == State.Action.SIT:
+            self.capture_images(cv_image)
 
         # elif action == State.Action.CRY:
         #     # TODO: implement pedestrian state
@@ -231,14 +238,14 @@ class topic_publisher:
             print(e)
 
         # Check for clues and update the best clue state
-        self.update_clue(cv_image)
+        # self.update_clue(cv_image)
 
         # If the clue has not improved in 3 seconds, find the letters, and reset the max area
-        if time.time() - self.state.clue_improved_time > 2:
-            print("CLUE IS GOOD")
-            self.submit_clue()
-            self.state.clue_improved_time = time.time()+300 # Set the time after comp, so it doesn't submit again
-            self.state.max_area = 0
+        # if time.time() - self.state.clue_improved_time > 2:
+        #     print("CLUE IS GOOD")
+        #     self.submit_clue()
+        #     self.state.clue_improved_time = time.time()+300 # Set the time after comp, so it doesn't submit again
+        #     self.state.max_area = 0
             
 
         # Generating masks to check for certain colurs
@@ -249,18 +256,40 @@ class topic_publisher:
         # Red
         red_mask = cv2.inRange(cv_image, LOWER_RED, UPPER_RED)
         red_pixel_count = cv2.countNonZero(red_mask)
-        # print("Red pixel count:", red_pixel_count)
+        print("Red pixel count:", red_pixel_count)
 
+        # generate short clip for obstacle detection
+        self.frames.append(cv_image)
+        if len(self.frames) == OBSTACLE_FRAME_COUNT:
+            video_writer = cv2.VideoWriter('output_video.avi', cv2.VideoWriter_fourcc(*'XVID'), 1, (cv_image.shape[1], cv_image.shape[0]))
+
+            # Write frames to the video
+            for frame in self.frames:
+                video_writer.write(frame)
+
+            # Release the video writer
+            video_writer.release()
+
+            # Reset the frame buffer and counter
+            self.frames = []
+            if self.obstacle_detection(video_writer):
+                state |= self.state.OBSTACLE
+
+
+        if self.obstacle_detection(cv_image):
+            state |= self.state.OBSTACLE
         # Create a local state that will be added by bitwise OR
         state = 0b00000000
         
-        if red_pixel_count > RED_THRESHOLD:
-            state |= self.state.RED
+        # if red_pixel_count > RED_THRESHOLD:
+        #     state |= self.state.RED
 
         if pink_pixel_count > PINK_THRESHOLD:
             state |= self.state.PINK
             if (self.state.last_state & self.state.PINK) == 0:
                 state |= self.state.PINK_ON
+        if red_pixel_count > RED_THRESHOLD:
+            state |= self.state.OBSTACLE
 
         state |= self.state.DRIVING
 
@@ -483,205 +512,225 @@ class topic_publisher:
         except rospy.ServiceException:
             print("Service call failed")
 
-    def update_clue(self, cv_image):
-        """Crops the image to the clue, if one is found
-        Stores the best clue in state"""
+    def capture_images(self, cv_image):
+        """Captures images of the road and desert, to be used for training"""
+        move = Twist()
+        move.angular.z = 0
+        move.linear.x = 0
 
-        # Convert BGR to HSV
-        hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
-
-        uh = 130
-        us = 255
-        uv = 255
-        lh = 120
-        ls = 100
-        lv = 70
-        lower_hsv = np.array([lh,ls,lv])
-        upper_hsv = np.array([uh,us,uv])
-
-        # Threshold the HSV image to get only blue colors
-        mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
-
-        # find contours in the mask
-        cnts, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP,
-                cv2.CHAIN_APPROX_SIMPLE)
-
-        # Find the contours that are holes (i.e. have a parent)
-        holes = []
-        for i in range(len(cnts)):
-            if hierarchy[0][i][3] >= 0:
-                holes.append(cnts[i])
-
-        # If something might be a clue, find the largest contour
-        if len(holes) > 0:
-            clue_border = max(holes, key=cv2.contourArea)
-            clue_size = cv2.contourArea(clue_border)
-            # Check area is big enough (to avoid false positives, or clues that are too far)
-            if clue_size < 10000:
-                return
-
-            # THE FOLLOWING HAPPENS IF A CLUE IS FOUND
-            # If the area is bigger than the previous biggest area, update the best clue
-            # and reset the time since the clue improved
-            if clue_size > self.state.max_area:
-
-                self.state.max_area = clue_size
-                self.state.clue_improved_time = time.time()
-            
-                # Template that the clue will be warped onto
-                clue = np.zeros((400, 600, 3), np.uint8)
-
-                top_right, bottom_right, bottom_left, top_left = self.find_clue_corners(clue_border)
-
-                input_pts = np.float32([top_right, bottom_right, bottom_left, top_left])
-                output_pts = np.float32([[clue.shape[1],0], [clue.shape[1],clue.shape[0]], [0,clue.shape[0]], [0,0]])
-
-                matrix = cv2.getPerspectiveTransform(input_pts, output_pts)
-                self.state.best_clue = cv2.warpPerspective(cv_image,matrix,(clue.shape[1], clue.shape[0]),flags=cv2.INTER_LINEAR)
-        
-        return
-
-    def submit_clue(self):
-        # Get the words from the clue 
-        type, clue = self.find_words()
-        print("TYPE:", type)
-        print("CLUE:", clue)
-
-        # Find clue number using the type dictionary
-        # In case the type is not found exactly, find the closest match
-        if type in CLUE_TYPES:
-            type_num = CLUE_TYPES[type]
-        else:
-            type_num = 0
-            min_dist = 100
-            for key in CLUE_TYPES:
-                dist = Levenshtein.distance(key, type)
-                if dist < min_dist:
-                    min_dist = dist
-                    type_num = CLUE_TYPES[key]
-        
-        # Publish the clue
-        self.score_pub.publish("%s,%s,%d,%s" % (TEAM_NAME, PASSWORD, type_num, clue))
-
-    def find_words(self):
-        print("\n\n\n\n\n\n\n\n\n\n\nFINDING WORDS")
-        clue = self.state.best_clue
-
-        cv2.imshow("Clue", clue)
+        self.move_pub.publish(move)
+        cv2.imshow("Image", cv_image)
         cv2.waitKey(3)
+        cv2.imwrite(
+            CAPTURE_PATH + "obstacle_images/image_%d.png" % self.frame_count,
+            cv_image,
+        )
+        self.frame_count += 1
+        print("Captured image %d" % self.frame_count)
 
-        clue_plate = clue[200:395, 5:595].copy()
-        type_plate = clue[5:200, 5:595].copy()
+    def obstacle_detection(self, cv_image):
+        """Function for the OBSTACLE state"""
+        return False
 
-        clue_hsv = cv2.cvtColor(clue_plate, cv2.COLOR_BGR2HSV)
-        type_hsv = cv2.cvtColor(type_plate, cv2.COLOR_BGR2HSV)
+    # def update_clue(self, cv_image):
+    #     """Crops the image to the clue, if one is found
+    #     Stores the best clue in state"""
 
-        uh = 130
-        us = 255
-        uv = 255
-        lh = 110
-        ls = 100
-        lv = 80
+    #     # Convert BGR to HSV
+    #     hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
 
-        lower_hsv = np.array([lh,ls,lv])
-        upper_hsv = np.array([uh,us,uv])
+    #     uh = 130
+    #     us = 255
+    #     uv = 255
+    #     lh = 120
+    #     ls = 100
+    #     lv = 70
+    #     lower_hsv = np.array([lh,ls,lv])
+    #     upper_hsv = np.array([uh,us,uv])
 
-        type_mask = cv2.inRange(type_hsv, lower_hsv, upper_hsv)
-        clue_mask = cv2.inRange(clue_hsv, lower_hsv, upper_hsv)
+    #     # Threshold the HSV image to get only blue colors
+    #     mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
 
-        # Dilate then erode to fill them in (?)
-        kernel = np.ones((3,3),np.uint8)
-        for i in range(10):
-            type_mask = cv2.dilate(type_mask, kernel, iterations=1)
-            clue_mask = cv2.dilate(clue_mask, kernel, iterations=1)
+    #     # find contours in the mask
+    #     cnts, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP,
+    #             cv2.CHAIN_APPROX_SIMPLE)
 
-            type_mask = cv2.erode(type_mask, kernel, iterations=1)
-            clue_mask = cv2.erode(clue_mask, kernel, iterations=1)
+    #     # Find the contours that are holes (i.e. have a parent)
+    #     holes = []
+    #     for i in range(len(cnts)):
+    #         if hierarchy[0][i][3] >= 0:
+    #             holes.append(cnts[i])
 
+    #     # If something might be a clue, find the largest contour
+    #     if len(holes) > 0:
+    #         clue_border = max(holes, key=cv2.contourArea)
+    #         clue_size = cv2.contourArea(clue_border)
+    #         # Check area is big enough (to avoid false positives, or clues that are too far)
+    #         if clue_size < 10000:
+    #             return
 
-        # Find contours (letters)
+    #         # THE FOLLOWING HAPPENS IF A CLUE IS FOUND
+    #         # If the area is bigger than the previous biggest area, update the best clue
+    #         # and reset the time since the clue improved
+    #         if clue_size > self.state.max_area:
 
-        type_cnts, _ = cv2.findContours(type_mask, cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE)
+    #             self.state.max_area = clue_size
+    #             self.state.clue_improved_time = time.time()
+            
+    #             # Template that the clue will be warped onto
+    #             clue = np.zeros((400, 600, 3), np.uint8)
 
-        clue_cnts, _ = cv2.findContours(clue_mask, cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE)
+    #             top_right, bottom_right, bottom_left, top_left = self.find_clue_corners(clue_border)
 
-        # Remove contours that are too small
+    #             input_pts = np.float32([top_right, bottom_right, bottom_left, top_left])
+    #             output_pts = np.float32([[clue.shape[1],0], [clue.shape[1],clue.shape[0]], [0,clue.shape[0]], [0,0]])
 
-        type_cnts = [c for c in type_cnts if cv2.contourArea(c) > 100]
-        clue_cnts = [c for c in clue_cnts if cv2.contourArea(c) > 100]
-
-        # The bounding boxes of the contours (a box with a letter in it)
-        clueBoundingBoxes = [cv2.boundingRect(c) for c in clue_cnts]
-        typeBoundingBoxes = [cv2.boundingRect(c) for c in type_cnts]
-
-        # sort the contours from left-to-right
-        typeBoundingBoxes = sorted((typeBoundingBoxes), key=lambda b:b[0], reverse=False)
-        clueBoundingBoxes = sorted((clueBoundingBoxes), key=lambda b:b[0], reverse=False)
+    #             matrix = cv2.getPerspectiveTransform(input_pts, output_pts)
+    #             self.state.best_clue = cv2.warpPerspective(cv_image,matrix,(clue.shape[1], clue.shape[0]),flags=cv2.INTER_LINEAR)
         
-        # If any bounding boxes are too big, split it (in case 2 letters' contours are connected)
-        for i in range(len(clueBoundingBoxes)):
-            if clueBoundingBoxes[i][2] > 60:
-                box1 = (clueBoundingBoxes[i][0], clueBoundingBoxes[i][1], clueBoundingBoxes[i][2]//2, clueBoundingBoxes[i][3])
-                box2 = (clueBoundingBoxes[i][0] + clueBoundingBoxes[i][2]//2, clueBoundingBoxes[i][1], clueBoundingBoxes[i][2]//2, clueBoundingBoxes[i][3])
-                clueBoundingBoxes.remove(clueBoundingBoxes[i])
-                clueBoundingBoxes.insert(i, box1)
-                clueBoundingBoxes.insert(i+1, box2)
-                print("SPLIT LETTERS!")
+    #     return
 
-        for i in range(len(typeBoundingBoxes)):
-            if typeBoundingBoxes[i][2] > 60:
-                box1 = (typeBoundingBoxes[i][0], typeBoundingBoxes[i][1], typeBoundingBoxes[i][2]//2, typeBoundingBoxes[i][3])
-                box2 = (typeBoundingBoxes[i][0] + typeBoundingBoxes[i][2]//2, typeBoundingBoxes[i][1], typeBoundingBoxes[i][2]//2, typeBoundingBoxes[i][3])
-                typeBoundingBoxes.remove(typeBoundingBoxes[i])
-                typeBoundingBoxes.insert(i, box1)
-                typeBoundingBoxes.insert(i+1, box2)
-                print("SPLIT LETTERS!")
+    # def submit_clue(self):
+    #     # Get the words from the clue 
+    #     type, clue = self.find_words()
+    #     print("TYPE:", type)
+    #     print("CLUE:", clue)
 
-        # Letter Template
-        letter = np.zeros((130, 80, 3), np.uint8)
+    #     # Find clue number using the type dictionary
+    #     # In case the type is not found exactly, find the closest match
+    #     if type in CLUE_TYPES:
+    #         type_num = CLUE_TYPES[type]
+    #     else:
+    #         type_num = 0
+    #         min_dist = 100
+    #         for key in CLUE_TYPES:
+    #             dist = Levenshtein.distance(key, type)
+    #             if dist < min_dist:
+    #                 min_dist = dist
+    #                 type_num = CLUE_TYPES[key]
+        
+    #     # Publish the clue
+    #     self.score_pub.publish("%s,%s,%d,%s" % (TEAM_NAME, PASSWORD, type_num, clue))
 
-        letter_imgs = []
+    # def find_words(self):
+    #     print("\n\n\n\n\n\n\n\n\n\n\nFINDING WORDS")
+    #     clue = self.state.best_clue
 
-        # For each rectangle (which is a letter), warp perspective to get the letter into the template
-        for i in range(len(typeBoundingBoxes)):
-            (x, y, w, h) = typeBoundingBoxes[i]
-            input_pts = np.float32([[x+w,y], [x+w,y+h], [x,y+h], [x,y]])
-            output_pts = np.float32([[letter.shape[1],0], [letter.shape[1],letter.shape[0]], [0,letter.shape[0]], [0,0]])
-            matrix = cv2.getPerspectiveTransform(input_pts, output_pts)
-            letter = cv2.warpPerspective(type_plate,matrix,(letter.shape[1], letter.shape[0]),flags=cv2.INTER_LINEAR)
-            letter = cv2.cvtColor(letter, cv2.COLOR_BGR2GRAY)
-            letter_imgs.append(np.array(letter))
+    #     cv2.imshow("Clue", clue)
+    #     cv2.waitKey(3)
 
-        for i in range(len(clueBoundingBoxes)):
-            (x, y, w, h) = clueBoundingBoxes[i]
-            input_pts = np.float32([[x+w,y], [x+w,y+h], [x,y+h], [x,y]])
-            output_pts = np.float32([[letter.shape[1],0], [letter.shape[1],letter.shape[0]], [0,letter.shape[0]], [0,0]])
-            matrix = cv2.getPerspectiveTransform(input_pts, output_pts)
-            letter = cv2.warpPerspective(clue_plate,matrix,(letter.shape[1], letter.shape[0]),flags=cv2.INTER_LINEAR)
-            letter = cv2.cvtColor(letter, cv2.COLOR_BGR2GRAY)
-            letter_imgs.append(np.array(letter))
+    #     clue_plate = clue[200:395, 5:595].copy()
+    #     type_plate = clue[5:200, 5:595].copy()
 
-        letter_imgs = np.expand_dims(np.array(letter_imgs), axis=-1)
+    #     clue_hsv = cv2.cvtColor(clue_plate, cv2.COLOR_BGR2HSV)
+    #     type_hsv = cv2.cvtColor(type_plate, cv2.COLOR_BGR2HSV)
 
-        # Now that there are images, input them into the neural network to get the string
-        print("Found Letters, beginning prediction")
-        start_time = time.time()
+    #     uh = 130
+    #     us = 255
+    #     uv = 255
+    #     lh = 110
+    #     ls = 100
+    #     lv = 80
 
-        prediction_arrays = self.letter_model.predict(letter_imgs)
+    #     lower_hsv = np.array([lh,ls,lv])
+    #     upper_hsv = np.array([uh,us,uv])
 
-        predicted_values = np.argmax(prediction_arrays, axis=1)
-        # turn the predicted values into the characters/numbers
-        predicted_values = [chr(x+65) if x < 26 else str(x-26) for x in predicted_values]
-        predicted_values = "".join(predicted_values)
+    #     type_mask = cv2.inRange(type_hsv, lower_hsv, upper_hsv)
+    #     clue_mask = cv2.inRange(clue_hsv, lower_hsv, upper_hsv)
 
-        type = predicted_values[:len(typeBoundingBoxes)]
-        clue = predicted_values[len(typeBoundingBoxes):]
+    #     # Dilate then erode to fill them in (?)
+    #     kernel = np.ones((3,3),np.uint8)
+    #     for i in range(10):
+    #         type_mask = cv2.dilate(type_mask, kernel, iterations=1)
+    #         clue_mask = cv2.dilate(clue_mask, kernel, iterations=1)
 
-        print("Completed Prediction. Took " + str(time.time()-start_time) + " seconds")
+    #         type_mask = cv2.erode(type_mask, kernel, iterations=1)
+    #         clue_mask = cv2.erode(clue_mask, kernel, iterations=1)
 
-        return type, clue
+
+    #     # Find contours (letters)
+
+    #     type_cnts, _ = cv2.findContours(type_mask, cv2.RETR_EXTERNAL,
+    #             cv2.CHAIN_APPROX_SIMPLE)
+
+    #     clue_cnts, _ = cv2.findContours(clue_mask, cv2.RETR_EXTERNAL,
+    #             cv2.CHAIN_APPROX_SIMPLE)
+
+    #     # Remove contours that are too small
+
+    #     type_cnts = [c for c in type_cnts if cv2.contourArea(c) > 100]
+    #     clue_cnts = [c for c in clue_cnts if cv2.contourArea(c) > 100]
+
+    #     # The bounding boxes of the contours (a box with a letter in it)
+    #     clueBoundingBoxes = [cv2.boundingRect(c) for c in clue_cnts]
+    #     typeBoundingBoxes = [cv2.boundingRect(c) for c in type_cnts]
+
+    #     # sort the contours from left-to-right
+    #     typeBoundingBoxes = sorted((typeBoundingBoxes), key=lambda b:b[0], reverse=False)
+    #     clueBoundingBoxes = sorted((clueBoundingBoxes), key=lambda b:b[0], reverse=False)
+        
+    #     # If any bounding boxes are too big, split it (in case 2 letters' contours are connected)
+    #     for i in range(len(clueBoundingBoxes)):
+    #         if clueBoundingBoxes[i][2] > 60:
+    #             box1 = (clueBoundingBoxes[i][0], clueBoundingBoxes[i][1], clueBoundingBoxes[i][2]//2, clueBoundingBoxes[i][3])
+    #             box2 = (clueBoundingBoxes[i][0] + clueBoundingBoxes[i][2]//2, clueBoundingBoxes[i][1], clueBoundingBoxes[i][2]//2, clueBoundingBoxes[i][3])
+    #             clueBoundingBoxes.remove(clueBoundingBoxes[i])
+    #             clueBoundingBoxes.insert(i, box1)
+    #             clueBoundingBoxes.insert(i+1, box2)
+    #             print("SPLIT LETTERS!")
+
+    #     for i in range(len(typeBoundingBoxes)):
+    #         if typeBoundingBoxes[i][2] > 60:
+    #             box1 = (typeBoundingBoxes[i][0], typeBoundingBoxes[i][1], typeBoundingBoxes[i][2]//2, typeBoundingBoxes[i][3])
+    #             box2 = (typeBoundingBoxes[i][0] + typeBoundingBoxes[i][2]//2, typeBoundingBoxes[i][1], typeBoundingBoxes[i][2]//2, typeBoundingBoxes[i][3])
+    #             typeBoundingBoxes.remove(typeBoundingBoxes[i])
+    #             typeBoundingBoxes.insert(i, box1)
+    #             typeBoundingBoxes.insert(i+1, box2)
+    #             print("SPLIT LETTERS!")
+
+    #     # Letter Template
+    #     letter = np.zeros((130, 80, 3), np.uint8)
+
+    #     letter_imgs = []
+
+    #     # For each rectangle (which is a letter), warp perspective to get the letter into the template
+    #     for i in range(len(typeBoundingBoxes)):
+    #         (x, y, w, h) = typeBoundingBoxes[i]
+    #         input_pts = np.float32([[x+w,y], [x+w,y+h], [x,y+h], [x,y]])
+    #         output_pts = np.float32([[letter.shape[1],0], [letter.shape[1],letter.shape[0]], [0,letter.shape[0]], [0,0]])
+    #         matrix = cv2.getPerspectiveTransform(input_pts, output_pts)
+    #         letter = cv2.warpPerspective(type_plate,matrix,(letter.shape[1], letter.shape[0]),flags=cv2.INTER_LINEAR)
+    #         letter = cv2.cvtColor(letter, cv2.COLOR_BGR2GRAY)
+    #         letter_imgs.append(np.array(letter))
+
+    #     for i in range(len(clueBoundingBoxes)):
+    #         (x, y, w, h) = clueBoundingBoxes[i]
+    #         input_pts = np.float32([[x+w,y], [x+w,y+h], [x,y+h], [x,y]])
+    #         output_pts = np.float32([[letter.shape[1],0], [letter.shape[1],letter.shape[0]], [0,letter.shape[0]], [0,0]])
+    #         matrix = cv2.getPerspectiveTransform(input_pts, output_pts)
+    #         letter = cv2.warpPerspective(clue_plate,matrix,(letter.shape[1], letter.shape[0]),flags=cv2.INTER_LINEAR)
+    #         letter = cv2.cvtColor(letter, cv2.COLOR_BGR2GRAY)
+    #         letter_imgs.append(np.array(letter))
+
+    #     letter_imgs = np.expand_dims(np.array(letter_imgs), axis=-1)
+
+    #     # Now that there are images, input them into the neural network to get the string
+    #     print("Found Letters, beginning prediction")
+    #     start_time = time.time()
+
+    #     prediction_arrays = self.letter_model.predict(letter_imgs)
+
+    #     predicted_values = np.argmax(prediction_arrays, axis=1)
+    #     # turn the predicted values into the characters/numbers
+    #     predicted_values = [chr(x+65) if x < 26 else str(x-26) for x in predicted_values]
+    #     predicted_values = "".join(predicted_values)
+
+    #     type = predicted_values[:len(typeBoundingBoxes)]
+    #     clue = predicted_values[len(typeBoundingBoxes):]
+
+    #     print("Completed Prediction. Took " + str(time.time()-start_time) + " seconds")
+
+    #     return type, clue
 
 
     def find_clue_corners(self, clue_border):
