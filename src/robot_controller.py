@@ -79,6 +79,7 @@ class State:
         DESERT = 2
         MOUNTAIN = 3
 
+    # TODO: finaiilse these actions, delte the ones we dont use, etc.
     class Action(Enum):
         DRIVE = 0
         AVOID = 1
@@ -128,8 +129,6 @@ class State:
                 #     self.location_count += 1
                 #     self.current_location = self.LOCATIONS[self.location_count]
                 return self.Action.DRIVE
-        elif self.current_state & self.OBSTACLE:
-            return self.Action.AVOID
         elif self.current_state & self.DRIVING:
             return self.Action.DRIVE
         # Based on the current state, choose an action to take
@@ -209,18 +208,13 @@ class topic_publisher:
             and self.state.current_location == State.Location.ROAD
         ):
             self.driving(cv_image)
-            self.obstacle_detection(cv_image)
         elif (
             action == State.Action.DRIVE
             and self.state.current_location == State.Location.OFFROAD
         ):
             self.offroad_driving(cv_image)
-        elif action == State.Action.AVOID:
-            self.obstacle_avoidance(cv_image)
         elif action == State.Action.SIT:
-            self.driving(cv_image)
-            self.obstacle_detection(cv_image)
-            # self.capture_images(cv_image)
+            self.avoid_obstacle()
 
         # elif action == State.Action.CRY:
         #     # TODO: implement pedestrian state
@@ -257,8 +251,8 @@ class topic_publisher:
         pink_pixel_count = cv2.countNonZero(pink_mask)
         # print("Pink pixel count:", pink_pixel_count)
         # Red
-        red_mask = cv2.inRange(cv_image, LOWER_RED, UPPER_RED)
-        red_pixel_count = cv2.countNonZero(red_mask)
+        # red_mask = cv2.inRange(cv_image, LOWER_RED, UPPER_RED)
+        # red_pixel_count = cv2.countNonZero(red_mask)
         # print("Red pixel count:", red_pixel_count)
 
         if self.obstacle_detection(cv_image):
@@ -273,8 +267,8 @@ class topic_publisher:
             state |= self.state.PINK
             if (self.state.last_state & self.state.PINK) == 0:
                 state |= self.state.PINK_ON
-        if red_pixel_count > RED_THRESHOLD:
-            state |= self.state.OBSTACLE
+        # if red_pixel_count > RED_THRESHOLD:
+        #     state |= self.state.OBSTACLE
 
         state |= self.state.DRIVING
 
@@ -411,6 +405,7 @@ class topic_publisher:
                 cv2.LINE_AA,
             )
 
+        # Print circles showing centroid, middle of screen, and error
         if len(top_2_contours) > 1:
             # red circles showing the centroids
             cv2.circle(
@@ -498,6 +493,7 @@ class topic_publisher:
         except rospy.ServiceException:
             print("Service call failed")
 
+    # TODO: delete this
     def capture_images(self, cv_image):
         """Captures images of the road and desert, to be used for training"""
         # move = Twist()
@@ -514,6 +510,7 @@ class topic_publisher:
         # self.frame_count += 1
         # print("Captured image %d" % self.frame_count)
 
+    # TODO: clean this up, make constants, etc. also prob more testing
     def obstacle_detection(self, cv_image):
         """Function for the OBSTACLE state"""
         frame = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
@@ -542,12 +539,24 @@ class topic_publisher:
         # check how many pixels on in the image
         pixel_count = cv2.countNonZero(segmented_image)
         print("pixel count:", pixel_count)
-        if pixel_count > OBSTACLE_THRESHOLD:
+        detected = pixel_count > OBSTACLE_THRESHOLD
+        if detected:
             print("OBSTACLE DETECTED")
-            cv2.putText(frame, "OBSTACLE DETECTED", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, "OBSTACLE DETECTED"+str(detected), (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
 
-        cv2.imshow("Segmented image", segmented_image)
-        return False
+        return detected
+
+
+        # TODO: Implement this when we figure out what to do/ if we figure it out...
+   
+   # TODO: Implement this when we figure out what to do/ if we figure it out...
+    def avoid_obstacle(self):
+        """Function for avoiding obsatcle"""
+        start_time = time.time()
+        move = Twist()
+        move.angular.z = 0.0
+        move.linear.x = 0.0
+        self.move_pub.publish(move)
 
     # def update_clue(self, cv_image):
     #     """Crops the image to the clue, if one is found
@@ -798,17 +807,6 @@ class topic_publisher:
 
         return top_right, bottom_right, bottom_left, top_left
 
-
-
-    # TODO: Implement this when we figure out what to do/ if we figure it out...
-    def pedestrian(self, cv_image):
-        """Function for the PEDESTRIAN state"""
-        start_time = time.time()
-        move = Twist()
-        move.angular.z = 0.0
-        move.linear.x = 0.1
-        # while time.time() - start_time < 3:
-            # self.move_pub.publish(move)
 
 
 def main(args):
