@@ -38,6 +38,7 @@ IMAGE_HEIGHT = 720
 IMAGE_WIDTH = 1280
 IMAGE_DEPTH = 3
 OBSTACLE_FRAME_COUNT = 10
+OBSTACLE_THRESHOLD = 1000
 
 # IMAGE MANIPULATION CONSTANTS
 CROP_AMOUNT = 250
@@ -141,8 +142,7 @@ class topic_publisher:
         self.bridge = CvBridge()
         self.state = State()
         self.previous_error = -100
-        self.frame_count = 0
-        self.frames = []
+        self.fgbg = cv2.createBackgroundSubtractorMOG2()
 
         self.image_sub = rospy.Subscriber(
             "R1/pi_camera/image_raw", Image, self.callback
@@ -196,12 +196,12 @@ class topic_publisher:
         if self.running:
             new_image = np.array(cv_image)
             self.image_difference = np.mean((new_image - self.last_image) ** 2 )
-            # print("Image difference:", self.image_difference)
-            # if self.image_difference < RESPAWN_THRESHOLD:
-            #     self.spawn_position(HOME)
-            #     self.state.current_state = self.state.DRIVING
-            #     self.state.set_location(State.Location.ROAD)
-            #     print("Respawned")
+            print("Image difference:", self.image_difference)
+            if self.image_difference < RESPAWN_THRESHOLD:
+                self.spawn_position(HOME)
+                self.state.current_state = self.state.DRIVING
+                self.state.set_location(State.Location.ROAD)
+                print("Respawned")
             self.last_image = new_image
 
         if (
@@ -209,6 +209,7 @@ class topic_publisher:
             and self.state.current_location == State.Location.ROAD
         ):
             self.driving(cv_image)
+            self.obstacle_detection(cv_image)
         elif (
             action == State.Action.DRIVE
             and self.state.current_location == State.Location.OFFROAD
@@ -217,7 +218,9 @@ class topic_publisher:
         elif action == State.Action.AVOID:
             self.obstacle_avoidance(cv_image)
         elif action == State.Action.SIT:
-            self.capture_images(cv_image)
+            self.driving(cv_image)
+            self.obstacle_detection(cv_image)
+            # self.capture_images(cv_image)
 
         # elif action == State.Action.CRY:
         #     # TODO: implement pedestrian state
@@ -256,25 +259,7 @@ class topic_publisher:
         # Red
         red_mask = cv2.inRange(cv_image, LOWER_RED, UPPER_RED)
         red_pixel_count = cv2.countNonZero(red_mask)
-        print("Red pixel count:", red_pixel_count)
-
-        # generate short clip for obstacle detection
-        self.frames.append(cv_image)
-        if len(self.frames) == OBSTACLE_FRAME_COUNT:
-            video_writer = cv2.VideoWriter('output_video.avi', cv2.VideoWriter_fourcc(*'XVID'), 1, (cv_image.shape[1], cv_image.shape[0]))
-
-            # Write frames to the video
-            for frame in self.frames:
-                video_writer.write(frame)
-
-            # Release the video writer
-            video_writer.release()
-
-            # Reset the frame buffer and counter
-            self.frames = []
-            if self.obstacle_detection(video_writer):
-                state |= self.state.OBSTACLE
-
+        # print("Red pixel count:", red_pixel_count)
 
         if self.obstacle_detection(cv_image):
             state |= self.state.OBSTACLE
@@ -514,22 +499,52 @@ class topic_publisher:
 
     def capture_images(self, cv_image):
         """Captures images of the road and desert, to be used for training"""
-        move = Twist()
-        move.angular.z = 0
-        move.linear.x = 0
+        # move = Twist()
+        # move.angular.z = 0
+        # move.linear.x = 0
 
-        self.move_pub.publish(move)
-        cv2.imshow("Image", cv_image)
-        cv2.waitKey(3)
-        cv2.imwrite(
-            CAPTURE_PATH + "obstacle_images/image_%d.png" % self.frame_count,
-            cv_image,
-        )
-        self.frame_count += 1
-        print("Captured image %d" % self.frame_count)
+        # self.move_pub.publish(move)
+        # cv2.imshow("Image", cv_image)
+        # cv2.waitKey(3)
+        # cv2.imwrite(
+        #     CAPTURE_PATH + "obstacle_images/image_%d.png" % self.frame_count,
+        #     cv_image,
+        # )
+        # self.frame_count += 1
+        # print("Captured image %d" % self.frame_count)
 
     def obstacle_detection(self, cv_image):
         """Function for the OBSTACLE state"""
+        frame = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+
+        # apply masks for raod lines and white
+        frame = cv2.erode(frame, np.ones((3,3), np.uint8), iterations=2)
+        mask = cv2.inRange(frame, 75, 115)
+        frame[mask>0] = [82]
+        mask = cv2.inRange(frame, 250, 255)
+        frame[mask>0] = [82]
+
+        cv2.imshow("Frame pre-erode", frame)
+        # Erode the image to remove artifacts
+        frame = cv2.erode(frame, np.ones((3,3), np.uint8), iterations=2)
+        cv2.imshow("Frame post-erode", frame)
+
+        # Apply background subtraction
+        fgmask = self.fgbg.apply(frame)
+
+        # Segment the image
+        segmented_image = cv2.bitwise_and(frame, frame, mask=fgmask)
+
+        # crop the segmented image
+        segmented_image = segmented_image[IMAGE_WIDTH//2-200:IMAGE_WIDTH//2+200,IMAGE_HEIGHT-300:IMAGE_HEIGHT]
+
+        # check how many pixels on in the image
+        pixel_count = cv2.countNonZero(segmented_image)
+        print("pixel count:", pixel_count)
+        if pixel_count > OBSTACLE_THRESHOLD:
+            print("OBSTACLE DETECTED")
+
+        cv2.imshow("segmented image", segmented_image)
         return False
 
     # def update_clue(self, cv_image):
