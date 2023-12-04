@@ -60,7 +60,7 @@ UPPER_DIRT = np.array([186, 220, 228], dtype=np.uint8)
 # PID CONSTANTS
 KP = 0.017
 KD = 0.003
-DKP = 0.4  # desert KP, multiplies KP
+OKP = 0.4  # desert KP, multiplies KP
 MAX_SPEED = 0.5
 SPEED_DROP = 0.00055
 
@@ -475,7 +475,7 @@ class topic_publisher:
         derivative = error - self.previous_error
         self.previous_error = error
 
-        move.angular.z = DKP * KP * error + KD * derivative
+        move.angular.z = OKP * KP * error + KD * derivative
         # print("Desert angular speed:", move.angular.z)
 
         move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
@@ -517,27 +517,32 @@ class topic_publisher:
         lines = self.process_image(cv_image)
         left_xs = {}
         right_xs = {}
-        if len(lines) > 0:
+        if lines is not None:
             for line in lines:
                 x1, y1, x2, y2 = line[0]
+                cv2.line(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
                 if x1 < IMAGE_WIDTH // 2 and x2 < IMAGE_WIDTH // 2:
                     left_xs[x1] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
                     left_xs[x2] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
                 elif x1 > IMAGE_WIDTH // 2 and x2 > IMAGE_WIDTH // 2:
                     right_xs[x1] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
                     right_xs[x2] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-            # calcualte the eroor by weighting and averaging the left and right sides
+            # calcualte the error by weighting and averaging the left and right sides
+            max_length = np.sqrt(IMAGE_HEIGHT ** 2 + (IMAGE_WIDTH/2) ** 2)
             if len(left_xs) > 0:
-                left_value = sum(key * value for key, value in left_xs.items()) / len(
+                left_value = sum(key * (value/max_length) for key, value in left_xs.items()) / len(
                     left_xs
                 )
+                left_value = np.mean(list(left_xs.keys()))
             if len(right_xs) > 0:
-                right_value = sum(key * value for key, value in right_xs.items()) / len(
+                right_value = sum(key * (value/max_length) for key, value in right_xs.items()) / len(
                     right_xs
                 )
+                right_value = np.mean(list(right_xs.keys()))
 
             if len(left_xs) > 0 and len(right_xs) > 0:
-                error = np.mean([left_value, right_value])
+                print("left", left_value, "right", right_value)
+                error = IMAGE_WIDTH / 2 - np.mean([left_value, right_value])
             elif len(left_xs) > 0:
                 lost_right = True
                 error = IMAGE_WIDTH / 2 - left_value
@@ -613,7 +618,7 @@ class topic_publisher:
 
         cv2.putText(
             cv_image,
-            str(self.state.current_location),
+            str(error),
             (10, 100),
             cv2.FONT_HERSHEY_SIMPLEX,
             1,
@@ -621,6 +626,8 @@ class topic_publisher:
             2,
             cv2.LINE_AA,
         )
+        self.capture_images2(cv_image)
+
         cv2.imshow("Desert Image", cv_image)
         cv2.waitKey(3)
 
@@ -631,7 +638,7 @@ class topic_publisher:
         derivative = error - self.previous_error
         self.previous_error = error
 
-        move.angular.z = DKP * KP * error + KD * derivative
+        move.angular.z = KP * error + KD * derivative
         print("Desert angular speed:", move.angular.z)
 
         move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
@@ -700,9 +707,10 @@ class topic_publisher:
 
         # Draw lines on a grayscale copy of the original image
         image_with_lines = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).copy()
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            cv2.line(image_with_lines, (x1, y1), (x2, y2), 255, 2)
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                cv2.line(image_with_lines, (x1, y1), (x2, y2), 255, 2)
 
         # set all pixels that are not white to black
         image_with_lines[image_with_lines < 255] = 0
@@ -723,8 +731,6 @@ class topic_publisher:
             for line in lines:
                 x1, y1, x2, y2 = line[0]
                 cv2.line(image_with_lines2, (x1, y1), (x2, y2), (0, 0, 255), 2)
-        
-        self.capture_images2(image_with_lines2)
 
         return lines
 
