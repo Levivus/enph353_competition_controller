@@ -33,7 +33,8 @@ TEAM_NAME = "MchnEarn"
 PASSWORD = "pswd"
 END_TIME = 5000000
 HOME = [5.5, 2.6, 0.1, 0.0, 0.0, np.sqrt(2), -np.sqrt(2)]
-DESERT_TEST = [0.5, -1.0, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
+OFFROAD_TEST = [0.5, -1.0, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
+FIRST_PINK = [0.5, 0.0, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
 IMAGE_HEIGHT = 720
 IMAGE_WIDTH = 1280
 IMAGE_DEPTH = 3
@@ -46,7 +47,7 @@ LOSS_FACTOR = 200
 RESPAWN_THRESHOLD = 5
 LOWER_PINK = np.array([200, 0, 200], dtype=np.uint8)
 UPPER_PINK = np.array([255, 150, 255], dtype=np.uint8)
-PINK_THRESHOLD = 100000
+PINK_THRESHOLD = 60000
 LOWER_RED = np.array([0, 0, 200], dtype=np.uint8)
 UPPER_RED = np.array([100, 100, 255], dtype=np.uint8)
 RED_THRESHOLD = 60000
@@ -59,7 +60,7 @@ UPPER_DIRT = np.array([186, 220, 228], dtype=np.uint8)
 KP = 0.017
 KD = 0.003
 DKP = 0.4 # desert KP, multiplies KP
-MAX_SPEED = 0.4
+MAX_SPEED = 0.5
 SPEED_DROP = 0.00055
 
 CLUE_TYPES = {"SIZE": 1, "VICTIM": 2, "CRIME": 3, "TIME": 4, "PLACE": 5, "MOTIVE": 6, "WEAPON": 7, "BANDIT": 8}
@@ -162,7 +163,7 @@ class topic_publisher:
         self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
         self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
         self.running = True
-        self.spawn_position(HOME)
+        self.spawn_position(OFFROAD_TEST)
         print("Done init")
 
     def clock_callback(self, data):
@@ -195,7 +196,7 @@ class topic_publisher:
         if self.running:
             new_image = np.array(cv_image)
             self.image_difference = np.mean((new_image - self.last_image) ** 2 )
-            print("Image difference:", self.image_difference)
+            # print("Image difference:", self.image_difference)
             if self.image_difference < RESPAWN_THRESHOLD:
                 self.spawn_position(HOME)
                 self.state.current_state = self.state.DRIVING
@@ -213,15 +214,9 @@ class topic_publisher:
             and self.state.current_location == State.Location.OFFROAD
         ):
             self.offroad_driving(cv_image)
+            self.capture_images(cv_image)
         elif action == State.Action.SIT:
             self.avoid_obstacle()
-
-        # elif action == State.Action.CRY:
-        #     # TODO: implement pedestrian state
-        #     self.driving(cv_image)
-        # elif action == State.Action.RESPAWN:
-        #     # TODO: implement desert state
-        #     self.driving(cv_image)
 
     def set_state(self, data):
         """Returns the current state of the robot, based on the image data
@@ -249,7 +244,7 @@ class topic_publisher:
         # Pink
         pink_mask = cv2.inRange(cv_image, LOWER_PINK, UPPER_PINK)
         pink_pixel_count = cv2.countNonZero(pink_mask)
-        print("Pink pixel count:", pink_pixel_count)
+        # print("Pink pixel count:", pink_pixel_count)
         # Red
         # red_mask = cv2.inRange(cv_image, LOWER_RED, UPPER_RED)
         # red_pixel_count = cv2.countNonZero(red_mask)
@@ -258,8 +253,8 @@ class topic_publisher:
         # Create a local state that will be added by bitwise OR
         state = 0b00000000
 
-        if self.obstacle_detection(cv_image) and self.state.current_location == State.Location.ROAD:
-            state |= self.state.OBSTACLE
+        # if self.obstacle_detection(cv_image) and self.state.current_location == State.Location.ROAD:
+        #     state |= self.state.OBSTACLE
 
         if pink_pixel_count > PINK_THRESHOLD:
             state |= self.state.PINK
@@ -348,6 +343,15 @@ class topic_publisher:
 
         self.move_pub.publish(move)
 
+    # write a function that saves to iameg to a folder location
+    def capture_images(self, cv_image):
+        cv2.imwrite(
+            CAPTURE_PATH + "offroad_images/image_%d.png" % self.frame_count,
+            cv_image,
+        )
+        self.frame_count += 1
+        print("Captured image %d" % self.frame_count)
+
     def offroad_driving(self, cv_image):
         lost_left = False
         lost_right = False
@@ -425,6 +429,7 @@ class topic_publisher:
                 -1,
             )
 
+        cv2.putText(cv_image, str(self.state.current_location), (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
         # cv2.imshow("Desert Mask", mask)
         cv2.imshow("Desert Image", cv_image)
         cv2.waitKey(3)
@@ -520,7 +525,7 @@ class topic_publisher:
         mask = cv2.inRange(frame, 160, 255)
         frame[mask>0] = [82]
 
-        cv2.imshow("Frame pre-erode", frame)
+        # cv2.imshow("Frame pre-erode", frame)
         # Erode the image to remove artifacts
         frame = cv2.erode(frame, np.ones((3,3), np.uint8), iterations=2)
 
@@ -535,12 +540,12 @@ class topic_publisher:
 
         # check how many pixels on in the image
         pixel_count = cv2.countNonZero(segmented_image)
-        print("pixel count:", pixel_count)
+        # print("pixel count:", pixel_count)
         detected = pixel_count > OBSTACLE_THRESHOLD
         if detected:
             print("OBSTACLE DETECTED")
         cv2.putText(frame, "OBSTACLE DETECTED"+str(detected), (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
-        cv2.imshow("Frame post-erode", frame)
+        # cv2.imshow("Frame post-erode", frame)
 
         return detected
 
