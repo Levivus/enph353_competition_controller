@@ -23,6 +23,7 @@ import inspect
 
 # from tensorflow.keras import layers
 import tensorflow as tf
+
 # from tensorflow.keras import optimizers
 
 # from tensorflow.keras.utils import plot_model
@@ -59,11 +60,20 @@ UPPER_DIRT = np.array([186, 220, 228], dtype=np.uint8)
 # PID CONSTANTS
 KP = 0.017
 KD = 0.003
-DKP = 0.4 # desert KP, multiplies KP
+DKP = 0.4  # desert KP, multiplies KP
 MAX_SPEED = 0.5
 SPEED_DROP = 0.00055
 
-CLUE_TYPES = {"SIZE": 1, "VICTIM": 2, "CRIME": 3, "TIME": 4, "PLACE": 5, "MOTIVE": 6, "WEAPON": 7, "BANDIT": 8}
+CLUE_TYPES = {
+    "SIZE": 1,
+    "VICTIM": 2,
+    "CRIME": 3,
+    "TIME": 4,
+    "PLACE": 5,
+    "MOTIVE": 6,
+    "WEAPON": 7,
+    "BANDIT": 8,
+}
 
 PATH = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe()))) + "/"
 ABSOLUTE_PATH = "/home/fizzer/ros_ws/src/enph353_competition_controller/src/"
@@ -89,12 +99,12 @@ class State:
         SIT = 4
 
     # Make state bitfield, so that multiple states can be active at once
-    NOTHING =  0b00000000
-    DRIVING =  0b00000001
-    PINK =     0b00000010
+    NOTHING = 0b00000000
+    DRIVING = 0b00000001
+    PINK = 0b00000010
     OBSTACLE = 0b00000100
-    CLUE =     0b00001000
-    PINK_ON =  0b00010000
+    CLUE = 0b00001000
+    PINK_ON = 0b00010000
 
     # location list
     LOCATIONS = [Location.ROAD, Location.OFFROAD, Location.DESERT, Location.MOUNTAIN]
@@ -105,11 +115,13 @@ class State:
         self.current_location = self.LOCATIONS[self.location_count]
         self.last_state = self.NOTHING
         self.last_pink_time = 0
-        self.best_clue = np.zeros((IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_DEPTH), dtype=np.uint8)
+        self.best_clue = np.zeros(
+            (IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_DEPTH), dtype=np.uint8
+        )
         self.clue_improved_time = time.time() + 500
         self.max_area = 0
         self.current_state = self.NOTHING
-    
+
     def set_location(self, location):
         self.current_location = location
         self.location_count = self.LOCATIONS.index(location)
@@ -143,6 +155,7 @@ class topic_publisher:
         self.state = State()
         self.previous_error = -100
         self.fgbg = cv2.createBackgroundSubtractorMOG2()
+        self.frame_count = 0
 
         self.image_sub = rospy.Subscriber(
             "R1/pi_camera/image_raw", Image, self.callback
@@ -179,10 +192,10 @@ class topic_publisher:
         Calls the appropriate function based on the state of the robot
         This is the main logic loop of the robot
         """
-        
-        cv_image = self.set_state(data) 
-        action = self.state.choose_action()
 
+        cv_image = self.set_state(data)
+        action = self.state.choose_action()
+        print("calling back")
         # print("State:", self.state.current_state)
         # print("Action:", action)
         # print("Location:", self.state.current_location)
@@ -195,7 +208,7 @@ class topic_publisher:
 
         if self.running:
             new_image = np.array(cv_image)
-            self.image_difference = np.mean((new_image - self.last_image) ** 2 )
+            self.image_difference = np.mean((new_image - self.last_image) ** 2)
             # print("Image difference:", self.image_difference)
             if self.image_difference < RESPAWN_THRESHOLD:
                 self.spawn_position(HOME)
@@ -213,8 +226,10 @@ class topic_publisher:
             action == State.Action.DRIVE
             and self.state.current_location == State.Location.OFFROAD
         ):
-            self.offroad_driving(cv_image)
+            # self.offroad_driving(cv_image)
+            self.offroad_driving2(cv_image)
             self.capture_images(cv_image)
+            print("past")
         elif action == State.Action.SIT:
             self.avoid_obstacle()
 
@@ -238,7 +253,6 @@ class topic_publisher:
         #     self.submit_clue()
         #     self.state.clue_improved_time = time.time()+300 # Set the time after comp, so it doesn't submit again
         #     self.state.max_area = 0
-            
 
         # Generating masks to check for certain colurs
         # Pink
@@ -329,7 +343,7 @@ class topic_publisher:
 
         # PID controller
         move = Twist()
-        
+
         # print("Road error", error)
         derivative = error - self.previous_error
         self.previous_error = error
@@ -343,7 +357,7 @@ class topic_publisher:
 
         self.move_pub.publish(move)
 
-    # write a function that saves to iameg to a folder location
+    # write a function that saves an image to a folder location
     def capture_images(self, cv_image):
         cv2.imwrite(
             CAPTURE_PATH + "offroad_images/image_%d.png" % self.frame_count,
@@ -351,6 +365,13 @@ class topic_publisher:
         )
         self.frame_count += 1
         print("Captured image %d" % self.frame_count)
+    
+    def capture_images2(self, cv_image):
+        cv2.imwrite(
+            CAPTURE_PATH + "offroad_images/put_image_%d.png" % self.frame_count,
+            cv_image,
+        )
+        print("Captured put_image %d" % self.frame_count)
 
     def offroad_driving(self, cv_image):
         lost_left = False
@@ -362,7 +383,7 @@ class topic_publisher:
 
         centroids = []
         if len(top_2_contours) > 1:
-        # get the centroids of the two largest contours
+            # get the centroids of the two largest contours
             for i in range(len(top_2_contours)):
                 M = cv2.moments(top_2_contours[i])
                 if M["m00"] == 0:
@@ -418,7 +439,11 @@ class topic_publisher:
             )
             # green circle showing the middle of the image
             cv2.circle(
-                cv_image, (IMAGE_WIDTH // 2, IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 255, 0), -1
+                cv_image,
+                (IMAGE_WIDTH // 2, IMAGE_HEIGHT - CROP_AMOUNT),
+                5,
+                (0, 255, 0),
+                -1,
             )
             # blue circle showing the mean of the centroids
             cv2.circle(
@@ -429,7 +454,16 @@ class topic_publisher:
                 -1,
             )
 
-        cv2.putText(cv_image, str(self.state.current_location), (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+        cv2.putText(
+            cv_image,
+            str(self.state.current_location),
+            (10, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
         # cv2.imshow("Desert Mask", mask)
         cv2.imshow("Desert Image", cv_image)
         cv2.waitKey(3)
@@ -450,31 +484,249 @@ class topic_publisher:
         self.move_pub.publish(move)
 
     # TODO: make this more efficient/ more reliable
+    # def process_image(self, image):
+    #     # mask the image
+    #     mask = cv2.inRange(image, LOWER_DIRT, UPPER_DIRT)
+
+    #     # Define a kernel (structuring element)
+    #     kernel = np.ones((3, 3), np.uint8)
+
+    #     # Perform 1st dilation
+    #     dilated_image = cv2.dilate(mask, kernel, iterations=1)
+
+    #     # Perform erosion
+    #     eroded_image = cv2.erode(dilated_image, kernel, iterations=2)
+
+    #     # Perform 2nd dilation
+    #     dilated_image = cv2.dilate(eroded_image, kernel, iterations=8)
+
+    #     dilate_contours, _ = cv2.findContours(
+    #         dilated_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    #     )
+
+    #     dilate_contours = sorted(dilate_contours, key=cv2.contourArea, reverse=True)
+
+    #     top_two_contours = dilate_contours[:2]
+
+    #     return top_two_contours
+
+    def offroad_driving2(self, cv_image):
+        lost_left = False
+        lost_right = False
+
+        lines = self.process_image(cv_image)
+        left_xs = {}
+        right_xs = {}
+        if len(lines) > 0:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                if x1 < IMAGE_WIDTH // 2 and x2 < IMAGE_WIDTH // 2:
+                    left_xs[x1] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+                    left_xs[x2] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+                elif x1 > IMAGE_WIDTH // 2 and x2 > IMAGE_WIDTH // 2:
+                    right_xs[x1] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+                    right_xs[x2] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+            # calcualte the eroor by weighting and averaging the left and right sides
+            if len(left_xs) > 0:
+                left_value = sum(key * value for key, value in left_xs.items()) / len(
+                    left_xs
+                )
+            if len(right_xs) > 0:
+                right_value = sum(key * value for key, value in right_xs.items()) / len(
+                    right_xs
+                )
+
+            if len(left_xs) > 0 and len(right_xs) > 0:
+                error = np.mean([left_value, right_value])
+            elif len(left_xs) > 0:
+                lost_right = True
+                error = IMAGE_WIDTH / 2 - left_value
+            elif len(right_xs) > 0:
+                lost_left = True
+                error = IMAGE_WIDTH / 2 - right_value
+        else:
+            error = -IMAGE_WIDTH / 2 if self.previous_error < 0 else IMAGE_WIDTH / 2
+
+        # TODO: maybe smooth this out? might not need it idk
+        if lost_left:  # This will bias the car to the left if the left side is lost
+            error = LOSS_FACTOR
+            # write onto image
+            cv2.putText(
+                cv_image,
+                "Lost LEFT",
+                (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+        if lost_right:
+            error = -LOSS_FACTOR
+            # write onto image
+            cv2.putText(
+                cv_image,
+                "Lost RIGHT",
+                (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+        # Print circles showing centroid, middle of screen, and error
+        if len(left_xs) > 0:
+            # red circles showing the centroids
+            cv2.circle(
+                cv_image,
+                (int(left_value), IMAGE_HEIGHT - CROP_AMOUNT),
+                5,
+                (0, 0, 255),
+                -1,
+            )
+        if len(right_xs) > 0:
+            cv2.circle(
+                cv_image,
+                (int(right_value), IMAGE_HEIGHT - CROP_AMOUNT),
+                5,
+                (0, 0, 255),
+                -1,
+            )
+            # green circle showing the middle of the image
+            cv2.circle(
+                cv_image,
+                (IMAGE_WIDTH // 2, IMAGE_HEIGHT - CROP_AMOUNT),
+                5,
+                (0, 255, 0),
+                -1,
+            )
+        if len(left_xs) > 0 and len(right_xs) > 0:
+            # blue circle showing the mean of the centroids
+            cv2.circle(
+                cv_image,
+                (int(np.mean([left_value, right_value])), IMAGE_HEIGHT - CROP_AMOUNT),
+                5,
+                (255, 0, 0),
+                -1,
+            )
+
+        cv2.putText(
+            cv_image,
+            str(self.state.current_location),
+            (10, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.imshow("Desert Image", cv_image)
+        cv2.waitKey(3)
+
+        # PID controller
+        move = Twist()
+
+        print("Desert error", error)
+        derivative = error - self.previous_error
+        self.previous_error = error
+
+        move.angular.z = DKP * KP * error + KD * derivative
+        print("Desert angular speed:", move.angular.z)
+
+        move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
+        print("Desert linear speed:", move.linear.x)
+
+        self.move_pub.publish(move)
+
+    def crop_to_floor(self, image):
+        # convert to HSV
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        kernel = np.ones((2, 2), np.uint8)
+
+        # generate floor mask
+        lower_hsv = np.array([6, 23, 118])
+        upper_hsv = np.array([84, 255, 255])
+
+        floor_mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
+
+        # clean up the mask
+        floor_mask = cv2.erode(floor_mask, kernel, iterations=1)
+        # generate floor mask
+        lower_green = np.array([60, 136, 25])
+        upper_green = np.array([75, 145, 35])
+
+        green_mask = cv2.inRange(image, lower_green, upper_green)
+
+        # clean up the mask
+        kernel = np.ones((5, 5), np.uint8)
+        green_mask = cv2.dilate(green_mask, kernel, iterations=4)
+
+        # set all images outside the mask to black
+        image[floor_mask == 0] = 0
+        image[green_mask > 0] = 0
+
+        # generate mask for the ROI
+        mask = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        mask[mask > 0] = 255
+
+        # find the minimum y value and crop the image to that
+        nonzero_points = np.column_stack(np.where(floor_mask > 0))
+        min_y = np.min(nonzero_points[:, 0])
+        cropped_img = image[min_y:, :]
+        cropped_mask = mask[min_y:, :]
+
+        return cropped_img, cropped_mask
+
     def process_image(self, image):
-        # mask the image
-        mask = cv2.inRange(image, LOWER_DIRT, UPPER_DIRT)
+        image, mask = self.crop_to_floor(image)
 
-        # Define a kernel (structuring element)
-        kernel = np.ones((3, 3), np.uint8)
+        # find canny edges for the image and the mask
+        blurred = cv2.bilateralFilter(image, d=9, sigmaColor=75, sigmaSpace=75)
+        edges = cv2.Canny(blurred, 50, 150)
+        edges_mask = cv2.Canny(mask, 50, 150)
 
-        # Perform 1st dilation
-        dilated_image = cv2.dilate(mask, kernel, iterations=1)
+        # dilate the edges mask
+        kernel = np.ones((2, 2), np.uint8)
+        edges_mask = cv2.dilate(edges_mask, kernel, iterations=2)
 
-        # Perform erosion
-        eroded_image = cv2.erode(dilated_image, kernel, iterations=2)
+        # remove edeges from edges that are also in edges_mask
+        edges[edges_mask == 255] = 0
 
-        # Perform 2nd dilation
-        dilated_image = cv2.dilate(eroded_image, kernel, iterations=8)
-
-        dilate_contours, _ = cv2.findContours(
-            dilated_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        # Use Hough Line Transform to find line segments on the edges
+        lines = cv2.HoughLinesP(
+            edges, 1, np.pi / 180, threshold=50, minLineLength=20, maxLineGap=20
         )
 
-        dilate_contours = sorted(dilate_contours, key=cv2.contourArea, reverse=True)
+        # Draw lines on a grayscale copy of the original image
+        image_with_lines = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).copy()
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            cv2.line(image_with_lines, (x1, y1), (x2, y2), 255, 2)
 
-        top_two_contours = dilate_contours[:2]
+        # set all pixels that are not white to black
+        image_with_lines[image_with_lines < 255] = 0
 
-        return top_two_contours
+        # Use Hough Line Transform to find line segments on the image with lines
+        lines = cv2.HoughLinesP(
+            image_with_lines,
+            1,
+            np.pi / 180,
+            threshold=50,
+            minLineLength=60,
+            maxLineGap=20,
+        )
+
+        # Draw the lines on a new copy of the original image
+        image_with_lines2 = image.copy()
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                cv2.line(image_with_lines2, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        
+        self.capture_images2(image_with_lines2)
+
+        return lines
 
     def spawn_position(self, position):
         msg = ModelState()
@@ -496,38 +748,21 @@ class topic_publisher:
         except rospy.ServiceException:
             print("Service call failed")
 
-    # TODO: delete this
-    def capture_images(self, cv_image):
-        """Captures images of the road and desert, to be used for training"""
-        # move = Twist()
-        # move.angular.z = 0
-        # move.linear.x = 0
-
-        # self.move_pub.publish(move)
-        # cv2.imshow("Image", cv_image)
-        # cv2.waitKey(3)
-        # cv2.imwrite(
-        #     CAPTURE_PATH + "obstacle_images/image_%d.png" % self.frame_count,
-        #     cv_image,
-        # )
-        # self.frame_count += 1
-        # print("Captured image %d" % self.frame_count)
-
     # TODO: clean this up, make constants, etc. also prob more testing
     def obstacle_detection(self, cv_image):
         """Function for the OBSTACLE state"""
         frame = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
 
         # apply masks for raod lines and white
-        frame = cv2.erode(frame, np.ones((3,3), np.uint8), iterations=2)
+        frame = cv2.erode(frame, np.ones((3, 3), np.uint8), iterations=2)
         mask = cv2.inRange(frame, 70, 115)
-        frame[mask>0] = [82]
+        frame[mask > 0] = [82]
         mask = cv2.inRange(frame, 160, 255)
-        frame[mask>0] = [82]
+        frame[mask > 0] = [82]
 
         # cv2.imshow("Frame pre-erode", frame)
         # Erode the image to remove artifacts
-        frame = cv2.erode(frame, np.ones((3,3), np.uint8), iterations=2)
+        frame = cv2.erode(frame, np.ones((3, 3), np.uint8), iterations=2)
 
         # Apply background subtraction
         fgmask = self.fgbg.apply(frame)
@@ -536,7 +771,10 @@ class topic_publisher:
         segmented_image = cv2.bitwise_and(frame, frame, mask=fgmask)
 
         # crop the segmented image
-        segmented_image = segmented_image[IMAGE_WIDTH//2-200:IMAGE_WIDTH//2+200,IMAGE_HEIGHT-300:IMAGE_HEIGHT]
+        segmented_image = segmented_image[
+            IMAGE_WIDTH // 2 - 200 : IMAGE_WIDTH // 2 + 200,
+            IMAGE_HEIGHT - 300 : IMAGE_HEIGHT,
+        ]
 
         # check how many pixels on in the image
         pixel_count = cv2.countNonZero(segmented_image)
@@ -544,15 +782,23 @@ class topic_publisher:
         detected = pixel_count > OBSTACLE_THRESHOLD
         if detected:
             print("OBSTACLE DETECTED")
-        cv2.putText(frame, "OBSTACLE DETECTED"+str(detected), (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+        cv2.putText(
+            frame,
+            "OBSTACLE DETECTED" + str(detected),
+            (10, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
         # cv2.imshow("Frame post-erode", frame)
 
         return detected
 
-
         # TODO: Implement this when we figure out what to do/ if we figure it out...
-   
-   # TODO: Test this and prob do something better then stop? also only works for road rn, gets tripped up on offroad
+
+    # TODO: Test this and prob do something better then stop? also only works for road rn, gets tripped up on offroad
     def avoid_obstacle(self):
         """Function for avoiding obsatcle"""
         start_time = time.time()
@@ -605,7 +851,7 @@ class topic_publisher:
 
     #             self.state.max_area = clue_size
     #             self.state.clue_improved_time = time.time()
-            
+
     #             # Template that the clue will be warped onto
     #             clue = np.zeros((400, 600, 3), np.uint8)
 
@@ -616,11 +862,11 @@ class topic_publisher:
 
     #             matrix = cv2.getPerspectiveTransform(input_pts, output_pts)
     #             self.state.best_clue = cv2.warpPerspective(cv_image,matrix,(clue.shape[1], clue.shape[0]),flags=cv2.INTER_LINEAR)
-        
+
     #     return
 
     # def submit_clue(self):
-    #     # Get the words from the clue 
+    #     # Get the words from the clue
     #     type, clue = self.find_words()
     #     print("TYPE:", type)
     #     print("CLUE:", clue)
@@ -637,7 +883,7 @@ class topic_publisher:
     #             if dist < min_dist:
     #                 min_dist = dist
     #                 type_num = CLUE_TYPES[key]
-        
+
     #     # Publish the clue
     #     self.score_pub.publish("%s,%s,%d,%s" % (TEAM_NAME, PASSWORD, type_num, clue))
 
@@ -676,7 +922,6 @@ class topic_publisher:
     #         type_mask = cv2.erode(type_mask, kernel, iterations=1)
     #         clue_mask = cv2.erode(clue_mask, kernel, iterations=1)
 
-
     #     # Find contours (letters)
 
     #     type_cnts, _ = cv2.findContours(type_mask, cv2.RETR_EXTERNAL,
@@ -697,7 +942,7 @@ class topic_publisher:
     #     # sort the contours from left-to-right
     #     typeBoundingBoxes = sorted((typeBoundingBoxes), key=lambda b:b[0], reverse=False)
     #     clueBoundingBoxes = sorted((clueBoundingBoxes), key=lambda b:b[0], reverse=False)
-        
+
     #     # If any bounding boxes are too big, split it (in case 2 letters' contours are connected)
     #     for i in range(len(clueBoundingBoxes)):
     #         if clueBoundingBoxes[i][2] > 60:
@@ -761,19 +1006,18 @@ class topic_publisher:
 
     #     return type, clue
 
-
     def find_clue_corners(self, clue_border):
         # Simplify the contour to 4 points
-        epsilon = 0.1*cv2.arcLength(clue_border,True)
-        approx = cv2.approxPolyDP(clue_border,epsilon,True)
+        epsilon = 0.1 * cv2.arcLength(clue_border, True)
+        approx = cv2.approxPolyDP(clue_border, epsilon, True)
 
         while len(approx) != 4:
             if len(approx) > 4:
                 epsilon = epsilon * 1.05
-                approx = cv2.approxPolyDP(clue_border,epsilon,True)
+                approx = cv2.approxPolyDP(clue_border, epsilon, True)
             elif len(approx) < 4:
                 epsilon = epsilon * 0.96
-                approx = cv2.approxPolyDP(clue_border,epsilon,True)
+                approx = cv2.approxPolyDP(clue_border, epsilon, True)
 
         # Classify the points as top left, top right, bottom right, bottom left
 
@@ -781,7 +1025,6 @@ class topic_publisher:
         approx_set = set()
         for i in range(len(approx)):
             approx_set.add(tuple(approx[i][0]))
-
 
         # Top left is the point with the smallest sum of x and y:
         top_left = [5000, 5000]
@@ -809,7 +1052,6 @@ class topic_publisher:
         bottom_left = approx_set.pop()
 
         return top_right, bottom_right, bottom_left, top_left
-
 
 
 def main(args):
