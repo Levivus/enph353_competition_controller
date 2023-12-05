@@ -14,7 +14,7 @@ from gazebo_msgs.msg import ModelState
 from gazebo_msgs.srv import SetModelState
 import numpy as np
 
-# import Levenshtein
+import Levenshtein
 
 import os
 import os.path
@@ -131,7 +131,7 @@ class State:
                 self.last_pink_time = time.time()
                 self.current_state &= ~self.PINK_ON
                 self.location_count += 1
-                self.current_location = self.LOCATIONS[self.location_count]
+                self.current_location = self.LOCATIONS[self.location_count]                
                 # elif time.time() - self.last_pink_time > 5:
                 #     self.location_count += 1
                 #     self.current_location = self.LOCATIONS[self.location_count]
@@ -169,6 +169,7 @@ class topic_publisher:
         self.output_details = self.lite_model.get_output_details()
 
         self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
+        self.clock = self.time_start
         self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
         self.running = True
         self.spawn_position(OFFROAD_TEST)
@@ -178,7 +179,8 @@ class topic_publisher:
         """Callback for the clock subscriber
         Publishes the score to the score tracker node when the competition ends
         """
-        if self.running and data.clock.secs - self.time_start > END_TIME:
+        self.clock = data.clock.secs
+        if self.running and self.clock - self.time_start > END_TIME:
             self.running = False
             self.score_pub.publish("%s,%s,-1,NA" % (TEAM_NAME, PASSWORD))
 
@@ -191,9 +193,9 @@ class topic_publisher:
         cv_image = self.set_state(data)
         action = self.state.choose_action()
         print("calling back")
-        # print("State:", self.state.current_state)
-        # print("Action:", action)
-        # print("Location:", self.state.current_location)
+        print("State:", self.state.current_state)
+        print("Action:", action)
+        print("Location:", self.state.current_location)
 
         if (
             action == State.Action.EXPLODE
@@ -205,7 +207,7 @@ class topic_publisher:
             new_image = np.array(cv_image)
             self.image_difference = np.mean((new_image - self.last_image) ** 2)
             # print("Image difference:", self.image_difference)
-            if self.image_difference < RESPAWN_THRESHOLD:
+            if self.image_difference < RESPAWN_THRESHOLD and self.clock - self.time_start > 10:
                 self.spawn_position(HOME)
                 self.state.current_state = self.state.DRIVING
                 self.state.set_location(State.Location.ROAD)
@@ -240,7 +242,7 @@ class topic_publisher:
             print(e)
 
         # Check for clues and update the best clue state
-        # self.update_clue(cv_image)
+        self.update_clue(cv_image)
 
         # If the clue has not improved in 3 seconds, find the letters, and reset the max area
         if time.time() - self.state.clue_improved_time > 2:
@@ -509,136 +511,422 @@ class topic_publisher:
         lost_right = False
 
         lines = self.process_image(cv_image)
-        left_xs = {}
-        right_xs = {}
+
+        # draw the lines onto the image
+        # for line in lines:
+            # x1, y1, x2, y2 = line[0]
+            # cv2.line(cv_image, (x1, y1), (x2, y2), (0, 255, 0), 1)
+            
+        # cv2.imshow("Desert Image 1", cv_image)
+        # cv2.waitKey(3)
+
         if lines is not None:
+            # Create a set of unclassified lines with all lines in it
+            # The line[0]'s are in the form [x1, y1, x2, y2]
+            unclassified_lines = set()
             for line in lines:
-                x1, y1, x2, y2 = line[0]
-                cv2.line(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                if x1 < IMAGE_WIDTH // 2 and x2 < IMAGE_WIDTH // 2:
-                    left_xs[x1] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-                    left_xs[x2] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-                elif x1 > IMAGE_WIDTH // 2 and x2 > IMAGE_WIDTH // 2:
-                    right_xs[x1] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-                    right_xs[x2] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-            # calcualte the error by weighting and averaging the left and right sides
-            max_length = np.sqrt(IMAGE_HEIGHT ** 2 + (IMAGE_WIDTH/2) ** 2)
-            if len(left_xs) > 0:
-                left_value = sum(key * (value/max_length) for key, value in left_xs.items()) / len(
-                    left_xs
-                )
-                left_value = np.mean(list(left_xs.keys()))
-            if len(right_xs) > 0:
-                right_value = sum(key * (value/max_length) for key, value in right_xs.items()) / len(
-                    right_xs
-                )
-                right_value = np.mean(list(right_xs.keys()))
+                unclassified_lines.add(tuple(line[0]))
 
-            if len(left_xs) > 0 and len(right_xs) > 0:
-                print("left", left_value, "right", right_value)
-                error = IMAGE_WIDTH / 2 - np.mean([left_value, right_value])
-            elif len(left_xs) > 0:
-                lost_right = True
-                error = IMAGE_WIDTH / 2 - left_value
-            elif len(right_xs) > 0:
+            left_lines, right_lines = self.classify_sets(unclassified_lines, cv_image)
+
+            if len(left_lines) == 0:
                 lost_left = True
-                error = IMAGE_WIDTH / 2 - right_value
-        else:
-            error = -IMAGE_WIDTH / 2 if self.previous_error < 0 else IMAGE_WIDTH / 2
 
-        # TODO: maybe smooth this out? might not need it idk
-        if lost_left:  # This will bias the car to the left if the left side is lost
-            error = LOSS_FACTOR
-            # write onto image
-            cv2.putText(
-                cv_image,
-                "Lost LEFT",
-                (10, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 0, 255),
-                2,
-                cv2.LINE_AA,
-            )
-        if lost_right:
-            error = -LOSS_FACTOR
-            # write onto image
-            cv2.putText(
-                cv_image,
-                "Lost RIGHT",
-                (10, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 0, 255),
-                2,
-                cv2.LINE_AA,
-            )
+            if len(right_lines) == 0:
+                lost_right = True
 
-        # Print circles showing centroid, middle of screen, and error
-        if len(left_xs) > 0:
-            # red circles showing the centroids
-            cv2.circle(
-                cv_image,
-                (int(left_value), IMAGE_HEIGHT - CROP_AMOUNT),
-                5,
-                (0, 0, 255),
-                -1,
-            )
-        if len(right_xs) > 0:
-            cv2.circle(
-                cv_image,
-                (int(right_value), IMAGE_HEIGHT - CROP_AMOUNT),
-                5,
-                (0, 0, 255),
-                -1,
-            )
-            # green circle showing the middle of the image
-            cv2.circle(
-                cv_image,
-                (IMAGE_WIDTH // 2, IMAGE_HEIGHT - CROP_AMOUNT),
-                5,
-                (0, 255, 0),
-                -1,
-            )
-        if len(left_xs) > 0 and len(right_xs) > 0:
-            # blue circle showing the mean of the centroids
-            cv2.circle(
-                cv_image,
-                (int(np.mean([left_value, right_value])), IMAGE_HEIGHT - CROP_AMOUNT),
-                5,
-                (255, 0, 0),
-                -1,
-            )
+            for line in left_lines:
+                x1, y1, x2, y2 = line
+                cv2.line(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
-        cv2.putText(
-            cv_image,
-            str(error),
-            (10, 100),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 0, 255),
-            2,
-            cv2.LINE_AA,
-        )
+            for line in right_lines:
+                x1, y1, x2, y2 = line
+                cv2.line(cv_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
+
+        #     # calcualte the error by weighting and averaging the left and right sides
+        #     max_length = np.sqrt(IMAGE_HEIGHT ** 2 + (IMAGE_WIDTH/2) ** 2)
+        #     if len(left_xs) > 0:
+        #         left_value = sum(key * (value/max_length) for key, value in left_xs.items()) / len(
+        #             left_xs
+        #         )
+        #         left_value = np.mean(list(left_xs.keys()))
+        #     if len(right_xs) > 0:
+        #         right_value = sum(key * (value/max_length) for key, value in right_xs.items()) / len(
+        #             right_xs
+        #         )
+        #         right_value = np.mean(list(right_xs.keys()))
+
+        #     if len(left_xs) > 0 and len(right_xs) > 0:
+        #         print("left", left_value, "right", right_value)
+        #         error = IMAGE_WIDTH / 2 - np.mean([left_value, right_value])
+        #     elif len(left_xs) > 0:
+        #         lost_right = True
+        #         error = IMAGE_WIDTH / 2 - left_value
+        #     elif len(right_xs) > 0:
+        #         lost_left = True
+        #         error = IMAGE_WIDTH / 2 - right_value
+        # else:
+        #     error = -IMAGE_WIDTH / 2 if self.previous_error < 0 else IMAGE_WIDTH / 2
+
+        # # TODO: maybe smooth this out? might not need it idk
+        # if lost_left:  # This will bias the car to the left if the left side is lost
+        #     error = LOSS_FACTOR
+        #     # write onto image
+        #     cv2.putText(
+        #         cv_image,
+        #         "Lost LEFT",
+        #         (10, 50),
+        #         cv2.FONT_HERSHEY_SIMPLEX,
+        #         1,
+        #         (0, 0, 255),
+        #         2,
+        #         cv2.LINE_AA,
+        #     )
+        # if lost_right:
+        #     error = -LOSS_FACTOR
+        #     # write onto image
+        #     cv2.putText(
+        #         cv_image,
+        #         "Lost RIGHT",
+        #         (10, 50),
+        #         cv2.FONT_HERSHEY_SIMPLEX,
+        #         1,
+        #         (0, 0, 255),
+        #         2,
+        #         cv2.LINE_AA,
+        #     )
+
+        # # Print circles showing centroid, middle of screen, and error
+        # if len(left_xs) > 0:
+        #     # red circles showing the centroids
+        #     cv2.circle(
+        #         cv_image,
+        #         (int(left_value), IMAGE_HEIGHT - CROP_AMOUNT),
+        #         5,
+        #         (0, 0, 255),
+        #         -1,
+        #     )
+        # if len(right_xs) > 0:
+        #     cv2.circle(
+        #         cv_image,
+        #         (int(right_value), IMAGE_HEIGHT - CROP_AMOUNT),
+        #         5,
+        #         (0, 0, 255),
+        #         -1,
+        #     )
+        #     # green circle showing the middle of the image
+        #     cv2.circle(
+        #         cv_image,
+        #         (IMAGE_WIDTH // 2, IMAGE_HEIGHT - CROP_AMOUNT),
+        #         5,
+        #         (0, 255, 0),
+        #         -1,
+        #     )
+        # if len(left_xs) > 0 and len(right_xs) > 0:
+        #     # blue circle showing the mean of the centroids
+        #     cv2.circle(
+        #         cv_image,
+        #         (int(np.mean([left_value, right_value])), IMAGE_HEIGHT - CROP_AMOUNT),
+        #         5,
+        #         (255, 0, 0),
+        #         -1,
+        #     )
+
+        # cv2.putText(
+        #     cv_image,
+        #     str(error),
+        #     (10, 100),
+        #     cv2.FONT_HERSHEY_SIMPLEX,
+        #     1,
+        #     (0, 0, 255),
+        #     2,
+        #     cv2.LINE_AA,
+        # )
         self.capture_images2(cv_image)
 
-        cv2.imshow("Desert Image", cv_image)
-        cv2.waitKey(3)
+        # cv2.imshow("Desert Image", cv_image)
+        # cv2.waitKey(3)
 
         # PID controller
         move = Twist()
 
-        print("Desert error", error)
-        derivative = error - self.previous_error
-        self.previous_error = error
+        # print("Desert error", error)
+        # derivative = error - self.previous_error
+        # self.previous_error = error
 
-        move.angular.z = KP * error + KD * derivative
-        print("Desert angular speed:", move.angular.z)
+        # move.angular.z = KP * error + KD * derivative
+        # print("Desert angular speed:", move.angular.z)
 
-        move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
-        print("Desert linear speed:", move.linear.x)
+        # move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
+        # print("Desert linear speed:", move.linear.x)
 
         self.move_pub.publish(move)
+
+    def classify_sets(self, unclassified_lines, cv_image):
+        left_lines = set()
+        left_lines_2 = set()
+        right_lines = set()
+        right_lines_2 = set()
+
+        rejection_angle = np.pi / 2 - 0.3
+
+        # classify the first and second left lines
+        left_line = None
+        left_line_2 = None
+        for line in unclassified_lines:
+            if self.line_angle(line) > (np.pi-rejection_angle):
+                if line[2] < IMAGE_WIDTH // 2 and line[0] < IMAGE_WIDTH // 2:
+                    if left_line is None:
+                        left_line = line
+                    elif self.line_length(line) > self.line_length(left_line):
+                        if left_line_2 is None:
+                            left_line_2 = left_line
+                        left_line = line
+                    elif left_line_2 is None:
+                        left_line_2 = line
+                    elif self.line_length(line) > self.line_length(left_line_2):
+                        left_line_2 = line
+                        
+
+        if left_line is not None:
+            left_lines.add(left_line)
+            # draw the line onto the image
+            x1, y1, x2, y2 = left_line
+            # cv2.line(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+
+        if left_line_2 is not None:
+            left_lines_2.add(left_line_2)
+            x1, y1, x2, y2 = left_line_2
+            # cv2.line(cv_image, (x1, y1), (x2, y2), (0, 255, 255), 2)
+
+
+        # classify the first and second right lines
+        right_line = None
+        right_line_2 = None
+        for line in unclassified_lines:
+            if self.line_angle(line) < rejection_angle:
+                if line[2] > IMAGE_WIDTH // 2 and line[0] > IMAGE_WIDTH // 2:
+                    if right_line is None:
+                        right_line = line
+                    elif self.line_length(line) > self.line_length(right_line):
+                        if right_line_2 is None:
+                            right_line_2 = right_line
+                        right_line = line
+                    elif right_line_2 is None:
+                        right_line_2 = line
+                    elif self.line_length(line) > self.line_length(right_line_2):
+                        right_line_2 = line
+                        
+
+        if right_line is not None:
+            right_lines.add(right_line)
+            x1, y1, x2, y2 = right_line
+            # cv2.line(cv_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
+
+        if right_line_2 is not None:
+            right_lines_2.add(right_line_2)
+            x1, y1, x2, y2 = right_line_2
+            # cv2.line(cv_image, (x1, y1), (x2, y2), (255, 255, 0), 2)
+
+        print("Right lines equal?", right_lines == right_lines_2)
+        print("Left lines equal?", left_lines == left_lines_2)
+        cv2.imshow("Desert Image", cv_image)
+        cv2.waitKey(3)
+        
+        # Check between left and right line which is lower - classify that set first
+        left_y_max = IMAGE_HEIGHT
+        right_y_max = IMAGE_HEIGHT
+
+        for line in left_lines:
+            if line[1] > left_y_max:
+                left_y_max = line[1]
+            if line[3] > left_y_max:
+                left_y_max = line[3]
+
+        for line in right_lines:
+            if line[1] < right_y_max:
+                right_y_max = line[1]
+            if line[3] < right_y_max:
+                right_y_max = line[3]
+
+        # Determine the order of operations
+        
+        if left_y_max > right_y_max:
+            first_set = left_lines
+            second_set = right_lines
+            first_set_2 = left_lines_2
+            second_set_2 = right_lines_2
+            unclassified_lines -= left_lines
+
+        else:
+            first_set = right_lines
+            second_set = left_lines
+            first_set_2 = right_lines_2
+            second_set_2 = left_lines_2
+            unclassified_lines -= right_lines
+
+        # Classify first set (first_set)
+        line_classified = True
+        while (line_classified):
+            line_classified = False
+            lines_to_remove = set()
+            for line in unclassified_lines:
+                # Check if the line is in the region of a left line
+                is_near = self.near_set(line, first_set)
+                if is_near:
+                    first_set.add(line)
+                    lines_to_remove.add(line)
+                    line_classified = True
+
+            unclassified_lines -= lines_to_remove
+
+        # Check if unclassified_lines contains first_set_2
+        # If so, classify first_set_2
+        if unclassified_lines & first_set_2:
+            line_classified = True
+            while (line_classified):
+                line_classified = False
+                lines_to_remove = set()
+                for line in unclassified_lines:
+                    # Check if the line is in the region of a left line
+                    is_near = self.near_set(line, first_set_2)
+                    if is_near:
+                        first_set_2.add(line)
+                        lines_to_remove.add(line)
+                        line_classified = True
+
+                unclassified_lines -= lines_to_remove
+
+        # If first_set_2 is larger than first_set, use it instead
+        if (len(first_set_2) > len(first_set)):
+            # Remove all lines from first_set and replace with first_set_2
+            first_set.clear()
+            first_set.update(first_set_2)
+
+        # If second_set is not in unclassified_lines, it is already classified
+        # so we can't use it
+        if (unclassified_lines & second_set):
+            # Repeat for second_set
+            line_classified = True
+            while (line_classified):
+                line_classified = False
+                lines_to_remove = set()
+                for line in unclassified_lines:
+                    # Check if the line is in the region of a left line
+                    is_near = self.near_set(line, second_set)
+                    if is_near:
+                        second_set.add(line)
+                        lines_to_remove.add(line)
+                        line_classified = True
+
+                unclassified_lines -= lines_to_remove
+        else: 
+            second_set -= second_set # Make it empty while keeping the link to the original set
+
+        # Check if unclassified_lines contains line_2 (second_set_2)
+        # If so, classify second_set_2
+        if unclassified_lines & second_set_2:
+            line_classified = True
+            while (line_classified):
+                line_classified = False
+                lines_to_remove = set()
+                for line in unclassified_lines:
+                    # Check if the line is in the region of a left line
+                    is_near = self.near_set(line, second_set_2)
+                    if is_near:
+                        first_set_2.add(line)
+                        lines_to_remove.add(line)
+                        line_classified = True
+
+                unclassified_lines -= lines_to_remove
+        else:
+            second_set_2 -= second_set_2
+
+        # Replace second_set with second_set_2 if it is larger
+        if (len(second_set_2) > len(second_set)):
+            second_set.clear()
+            second_set.update(second_set_2)
+
+        
+        # If both sets are empty, check remaining unclassified lines
+        if len(second_set) == 0 and len(second_set_2) == 0:
+            second_set -= second_set
+            new_line = None
+            for line in unclassified_lines:
+                if left_y_max > right_y_max: # unclassified lines are right
+                    if self.line_angle(line) < rejection_angle:
+                        if new_line is None:
+                            new_line = line
+                        elif self.line_length(line) > self.line_length(new_line):
+                            new_line = line
+                else: # unclassified lines are left
+                    if self.line_angle(line) > np.pi - rejection_angle:
+                        if new_line is None:
+                            new_line = line
+                        elif self.line_length(line) > self.line_length(new_line):
+                            new_line = line
+
+            if new_line is not None:
+                second_set.add(new_line)
+
+            line_classified = True
+            while (line_classified):
+                line_classified = False
+                lines_to_remove = set()
+                for line in unclassified_lines:
+                    # Check if the line is in the region of a left line
+                    is_near = self.near_set(line, second_set)
+                    if is_near:
+                        first_set_2.add(line)
+                        lines_to_remove.add(line)
+                        line_classified = True
+
+                unclassified_lines -= lines_to_remove
+
+        return left_lines, right_lines
+
+    def line_length(self, line):
+        x1, y1, x2, y2 = line
+        return np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+
+    def line_angle(self, line):
+        """Returns the angle of the line in radians
+        If angled to the right, the angle will be from 0 to pi/2
+        If angled to the left, the angle will be from pi/2 to pi"""
+        x1, y1, x2, y2 = line
+        angle = np.arctan2(y2 - y1, x2 - x1) #from -pi to pi
+        if angle < 0:
+            angle += np.pi
+        return angle
+    
+    def near_set(self, line, set):
+        """Returns whether the line is in the region of a line in the set"""
+        if len(set) == 0:
+            return False
+        
+        for set_line in set:
+            # If either point of the line is within set_threshold pixels of any point on
+            # the set line, return true
+            if self.point_near_line(line[0:2], set_line) or self.point_near_line(line[2:4], set_line):
+                return True
+            
+        return False
+    
+    def point_near_line(self, point, line):
+        x1, y1, x2, y2 = line
+        x, y = point
+
+        set_threshold = 25
+
+        # If the point is too far outside the points of the line, return false
+        if (x+set_threshold < x1 and x+set_threshold < x2) or (x-set_threshold > x1 and x-set_threshold > x2):
+            return False
+        elif (y+set_threshold < y1 and y+set_threshold < y2) or (y-set_threshold > y1 and y-set_threshold > y2):
+            return False
+        # Otherwise, calculate distance to line, and return if it is small enough
+        else:
+            distance = abs((x2-x1)*(y1-y)-(x1-x)*(y2-y1)) / np.sqrt((y2 - y1) ** 2 + (x2 - x1) ** 2)
+            return distance < set_threshold
 
     def crop_to_floor(self, image):
         # convert to HSV
@@ -673,23 +961,30 @@ class topic_publisher:
 
         # find the minimum y value and crop the image to that
         nonzero_points = np.column_stack(np.where(floor_mask > 0))
-        min_y = np.min(nonzero_points[:, 0])
+        if nonzero_points is not None and nonzero_points.size > 0:
+            min_y = np.min(nonzero_points[:, 0])
+        else:
+            min_y = 0
         cropped_img = image[min_y:, :]
         cropped_mask = mask[min_y:, :]
 
-        return cropped_img, cropped_mask
+        return cropped_img, cropped_mask, min_y
 
     def process_image(self, image):
-        image, mask = self.crop_to_floor(image)
+        image, mask, min_y = self.crop_to_floor(image)
 
         # find canny edges for the image and the mask
         blurred = cv2.bilateralFilter(image, d=9, sigmaColor=75, sigmaSpace=75)
         edges = cv2.Canny(blurred, 50, 150)
         edges_mask = cv2.Canny(mask, 50, 150)
+        
+        # dilate edges to help with hough ?
+        # kernel = np.ones((2, 2), np.uint8)
+        # edges = cv2.dilate(edges, kernel, iterations=1)
 
         # dilate the edges mask
         kernel = np.ones((2, 2), np.uint8)
-        edges_mask = cv2.dilate(edges_mask, kernel, iterations=2)
+        edges_mask = cv2.dilate(edges_mask, kernel, iterations=3)
 
         # remove edeges from edges that are also in edges_mask
         edges[edges_mask == 255] = 0
@@ -719,14 +1014,39 @@ class topic_publisher:
             maxLineGap=20,
         )
 
-        # Draw the lines on a new copy of the original image
-        image_with_lines2 = image.copy()
+        removedLine = True
+        while removedLine:
+            # Iterate through each pair of lines in lines
+            removedLine = False
+            for i in range(len(lines)):
+                for j in range(i + 1, len(lines)):
+                    # If the lines are close enough together, remove the shorter one
+                    if self.lines_close(lines[i][0], lines[j][0]):
+                        if self.line_length(lines[i][0]) > self.line_length(lines[j][0]):
+                            lines = np.delete(lines, j, 0)
+                        else:
+                            lines = np.delete(lines, i, 0)
+                        removedLine = True
+                        break
+                if removedLine:
+                    break
+
+        #Add min_y to the y values of the lines to account for the crop
         if lines is not None:
             for line in lines:
                 x1, y1, x2, y2 = line[0]
-                cv2.line(image_with_lines2, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                line[0][1] += min_y
+                line[0][3] += min_y
 
         return lines
+    
+    def lines_close(self, line1, line2):
+        # If both points are within 10 pixels of each other, return true
+        x1, y1, x2, y2 = line1
+        x3, y3, x4, y4 = line2
+        distance1 = min(np.sqrt((x1 - x3) ** 2 + (y1 - y3) ** 2), np.sqrt((x1 - x4) ** 2 + (y1 - y4) ** 2))
+        distance2 = min(np.sqrt((x2 - x3) ** 2 + (y2 - y3) ** 2), np.sqrt((x2 - x4) ** 2 + (y2 - y4) ** 2))
+        return distance1 < 10 and distance2 < 10
 
     def spawn_position(self, position):
         msg = ModelState()
@@ -807,6 +1127,7 @@ class topic_publisher:
         return
 
     def submit_clue(self):
+        # cv2.imshow("Best Clue", self.state.best_clue)
         # Get the words from the clue 
         type, clue = self.find_words()
         print("TYPE:", type)
@@ -830,9 +1151,6 @@ class topic_publisher:
 
     def find_words(self):
         clue = self.state.best_clue
-
-        cv2.imshow("Clue", clue)
-        cv2.waitKey(3)
 
         clue_plate = clue[200:395, 5:595].copy()
         type_plate = clue[5:200, 5:595].copy()
@@ -942,8 +1260,6 @@ class topic_publisher:
         outputs = self.lite_model.get_tensor(self.output_details[0]['index'])
         outputs = np.array(outputs)
 
-        print("Prediction time:", time.time() - start_time)
-
         predicted_values = np.argmax(outputs, axis=1)
         # turn the predicted values into the characters/numbers
         predicted_values = [chr(x+65) if x < 26 else str(x-26) for x in predicted_values]
@@ -951,8 +1267,6 @@ class topic_publisher:
         
         type = predicted_values[:len(typeBoundingBoxes)]
         clue = predicted_values[len(typeBoundingBoxes):]
-
-        print("Completed Prediction. Took " + str(time.time()-start_time) + " seconds")
 
         return type, clue
         
