@@ -36,6 +36,7 @@ END_TIME = 5000000
 HOME = [5.5, 2.6, 0.1, 0.0, 0.0, np.sqrt(2), -np.sqrt(2)]
 OFFROAD_TEST = [0.5, -1.0, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
 FIRST_PINK = [0.5, 0.0, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
+DESERT_TEST = [-3.5, 0.45, 0.1, 0.0, 0.0, 1, 0]
 IMAGE_HEIGHT = 720
 IMAGE_WIDTH = 1280
 IMAGE_DEPTH = 3
@@ -156,6 +157,8 @@ class topic_publisher:
         self.previous_error = -100
         self.fgbg = cv2.createBackgroundSubtractorMOG2()
         self.frame_count = 0
+        self.state.set_location(self.state.Location.OFFROAD)
+        self.tunnel_time = False
 
         self.image_sub = rospy.Subscriber(
             "R1/pi_camera/image_raw", Image, self.callback
@@ -176,7 +179,7 @@ class topic_publisher:
         self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
         self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
         self.running = True
-        self.spawn_position(OFFROAD_TEST)
+        self.spawn_position(DESERT_TEST)
         print("Done init")
 
     def clock_callback(self, data):
@@ -192,10 +195,10 @@ class topic_publisher:
         Calls the appropriate function based on the state of the robot
         This is the main logic loop of the robot
         """
-
+        print("calling back")
         cv_image = self.set_state(data)
         action = self.state.choose_action()
-        print("calling back")
+
         # print("State:", self.state.current_state)
         # print("Action:", action)
         # print("Location:", self.state.current_location)
@@ -227,9 +230,13 @@ class topic_publisher:
             and self.state.current_location == State.Location.OFFROAD
         ):
             # self.offroad_driving(cv_image)
-            self.offroad_driving2(cv_image)
-            self.capture_images(cv_image)
-            print("past")
+            # self.offroad_driving2(cv_image)
+            self.test()
+        elif (
+            action == State.Action.DRIVE
+            and self.state.current_location == State.Location.DESERT
+        ):
+            self.desert(cv_image)
         elif action == State.Action.SIT:
             self.avoid_obstacle()
 
@@ -243,6 +250,8 @@ class topic_publisher:
             cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
         except CvBridgeError as e:
             print(e)
+        # self.capture_images3(cv_image)
+        img = cv_image.copy()
 
         # Check for clues and update the best clue state
         # self.update_clue(cv_image)
@@ -365,13 +374,26 @@ class topic_publisher:
         )
         self.frame_count += 1
         print("Captured image %d" % self.frame_count)
-    
+
     def capture_images2(self, cv_image):
         cv2.imwrite(
             CAPTURE_PATH + "offroad_images/put_image_%d.png" % self.frame_count,
             cv_image,
         )
         print("Captured put_image %d" % self.frame_count)
+
+    def capture_images3(self, cv_image):
+        cv2.imwrite(
+            CAPTURE_PATH + "desert_images/image_%d.png" % self.frame_count,
+            cv_image,
+        )
+        print("Captured image %d" % self.frame_count)
+        self.frame_count += 1
+
+    def test(self):
+        move = Twist()
+        move.linear.x = 0.3
+        self.move_pub.publish(move)
 
     def offroad_driving(self, cv_image):
         lost_left = False
@@ -484,31 +506,31 @@ class topic_publisher:
         self.move_pub.publish(move)
 
     # TODO: make this more efficient/ more reliable
-    # def process_image(self, image):
-    #     # mask the image
-    #     mask = cv2.inRange(image, LOWER_DIRT, UPPER_DIRT)
+    def process_image(self, image):
+        # mask the image
+        mask = cv2.inRange(image, LOWER_DIRT, UPPER_DIRT)
 
-    #     # Define a kernel (structuring element)
-    #     kernel = np.ones((3, 3), np.uint8)
+        # Define a kernel (structuring element)
+        kernel = np.ones((3, 3), np.uint8)
 
-    #     # Perform 1st dilation
-    #     dilated_image = cv2.dilate(mask, kernel, iterations=1)
+        # Perform 1st dilation
+        dilated_image = cv2.dilate(mask, kernel, iterations=1)
 
-    #     # Perform erosion
-    #     eroded_image = cv2.erode(dilated_image, kernel, iterations=2)
+        # Perform erosion
+        eroded_image = cv2.erode(dilated_image, kernel, iterations=2)
 
-    #     # Perform 2nd dilation
-    #     dilated_image = cv2.dilate(eroded_image, kernel, iterations=8)
+        # Perform 2nd dilation
+        dilated_image = cv2.dilate(eroded_image, kernel, iterations=8)
 
-    #     dilate_contours, _ = cv2.findContours(
-    #         dilated_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    #     )
+        dilate_contours, _ = cv2.findContours(
+            dilated_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
 
-    #     dilate_contours = sorted(dilate_contours, key=cv2.contourArea, reverse=True)
+        dilate_contours = sorted(dilate_contours, key=cv2.contourArea, reverse=True)
 
-    #     top_two_contours = dilate_contours[:2]
+        top_two_contours = dilate_contours[:2]
 
-    #     return top_two_contours
+        return top_two_contours
 
     def offroad_driving2(self, cv_image):
         lost_left = False
@@ -528,16 +550,16 @@ class topic_publisher:
                     right_xs[x1] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
                     right_xs[x2] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
             # calcualte the error by weighting and averaging the left and right sides
-            max_length = np.sqrt(IMAGE_HEIGHT ** 2 + (IMAGE_WIDTH/2) ** 2)
+            max_length = np.sqrt(IMAGE_HEIGHT**2 + (IMAGE_WIDTH / 2) ** 2)
             if len(left_xs) > 0:
-                left_value = sum(key * (value/max_length) for key, value in left_xs.items()) / len(
-                    left_xs
-                )
+                left_value = sum(
+                    key * (value / max_length) for key, value in left_xs.items()
+                ) / len(left_xs)
                 left_value = np.mean(list(left_xs.keys()))
             if len(right_xs) > 0:
-                right_value = sum(key * (value/max_length) for key, value in right_xs.items()) / len(
-                    right_xs
-                )
+                right_value = sum(
+                    key * (value / max_length) for key, value in right_xs.items()
+                ) / len(right_xs)
                 right_value = np.mean(list(right_xs.keys()))
 
             if len(left_xs) > 0 and len(right_xs) > 0:
@@ -733,6 +755,134 @@ class topic_publisher:
                 cv2.line(image_with_lines2, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
         return lines
+
+    def desert(self, cv_image):
+        lower_blue = np.array([0, 0, 0])
+        upper_blue = np.array([110, 3, 3])
+        image_split = 2
+        pink_thresh = 10
+        pink_thresh2 = 10000
+        time_thresh = 0.6
+        lower_pink = np.array([200, 0, 200])
+        upper_pink = np.array([255, 150, 255])
+        lower_tunnel = np.array([80, 100, 185])
+        upper_tunnel = np.array([95, 120, 195])
+        statey = "blue"
+
+        blue_mask = cv2.inRange(cv_image, lower_blue, upper_blue)
+        pink_mask = cv2.inRange(cv_image, lower_pink, upper_pink)
+        tunnel_mask = cv2.inRange(cv_image, lower_tunnel, upper_tunnel)
+        tunnel_mask = cv2.dilate(tunnel_mask, np.ones((3,3),np.uint8),iterations = 5)
+        pink_pixel_count = cv2.countNonZero(pink_mask)
+
+        print("pink pixel count:", pink_pixel_count)
+        print("time", time.time() - self.state.last_pink_time)
+        print(self.tunnel_time)
+
+        contours, _ = cv2.findContours(
+            blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        if (
+            pink_pixel_count > pink_thresh
+            and time.time() - self.state.last_pink_time > time_thresh
+        ):
+            statey = "pink"
+            contours, _ = cv2.findContours(
+                pink_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+
+        if (pink_pixel_count > pink_thresh2 or self.tunnel_time) and time.time() - self.state.last_pink_time > time_thresh:
+            self.tunnel_time = True
+            statey = "tunnel"
+            contours, _ = cv2.findContours(
+                tunnel_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+
+        if len(contours) > 0:
+            if self.tunnel_time:
+                centroids = []
+                x_coordinates = []
+                for contour in contours:
+                    # Calculate the moments of the contour
+                    M = cv2.moments(contour)
+
+                    # Calculate centroid coordinates
+                    if M['m00'] != 0:
+                        cx = int(M['m10'] / M['m00'])
+                        cy = int(M['m01'] / M['m00'])
+                        centroids.append((cx, cy))
+                        x_coordinates.append(cx)
+                    else:
+                        # Handle the case where the area is zero (avoid division by zero)
+                        centroids.append(None)
+
+                # Calculate the average x-coordinate
+                if x_coordinates:
+                    centroid_x = np.mean(x_coordinates)
+
+            else:
+                max_contour = max(contours, key=cv2.contourArea)
+                cv2.drawContours(cv_image, [max_contour], -1, (0, 0, 255), 2)
+                M = cv2.moments(max_contour)
+                if M["m00"] == 0:
+                    return
+                centroid_x = int(M["m10"] / M["m00"])
+
+            cv2.circle(
+                cv_image,
+                (int(IMAGE_WIDTH / image_split), IMAGE_HEIGHT // 2),
+                5,
+                (0, 255, 0),
+                -1,
+            )
+            cv2.circle(cv_image, (centroid_x, IMAGE_HEIGHT // 2), 5, (0, 0, 255), -1)
+            cv2.putText(
+                cv_image,
+                str(pink_pixel_count),
+                (10, 100),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                cv_image,
+                statey,
+                (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+            error = IMAGE_WIDTH / image_split - centroid_x
+        else:
+            error = IMAGE_WIDTH / image_split
+        print("error", error)
+
+        self.capture_images3(cv_image)
+
+        cv2.imshow("Desert Mask", tunnel_mask)
+        cv2.imshow("Desert Image", cv_image)
+        cv2.waitKey(3)
+
+        move = Twist()
+        # print("Desert error", error)
+        derivative = error - self.previous_error
+        self.previous_error = error
+
+        # positive means the car should turn right
+        move.angular.z = KP * error + KD * derivative
+        print("Desert angular speed:", move.angular.z)
+
+        move.linear.x = max(0, 1 - SPEED_DROP * abs(error))
+        # move.linear.x = 0.1
+        print("Desert linear speed:", move.linear.x)
+
+        self.move_pub.publish(move)
 
     def spawn_position(self, position):
         msg = ModelState()

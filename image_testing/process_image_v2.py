@@ -11,7 +11,7 @@ of what it's doing, and potentially how it can be improved.
 """
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-image = cv2.imread(os.path.join(script_dir, 'offroad_images', 'image_0.png'))
+image = cv2.imread(os.path.join(script_dir, 'driving_images', 'image_0.png'))
 
 def crop_to_floor(image):
     # convert to HSV
@@ -92,8 +92,11 @@ def process_image(image):
 
     return image_with_lines2
 
-
+cv2.imshow('image', image)
+st = time.time()
+# print(time.time())
 cv2.imshow('image', process_image(image))
+print((time.time()-st)*1000)
 cv2.waitKey(0)
 cv2.destroyAllWindows()
 
