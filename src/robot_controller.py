@@ -28,7 +28,7 @@ TEAM_NAME = "MchnEarn"
 PASSWORD = "pswd"
 END_TIME = 5000000
 HOME = [5.5, 2.6, 0.1, 0.0, 0.0, np.sqrt(2), -np.sqrt(2)]
-OFFROAD_TEST = [0.5, -1.0, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
+OFFROAD_TEST = [0.5, -0.5, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
 FIRST_PINK = [0.5, 0.0, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
 IMAGE_HEIGHT = 720
 IMAGE_WIDTH = 1280
@@ -55,6 +55,9 @@ UPPER_DIRT = np.array([186, 220, 228], dtype=np.uint8)
 KP = 0.017
 KD = 0.003
 OKP = 0.4  # desert KP, multiplies KP
+OKD = 1  # desert KD, multiplies KD
+OKX = 1 # desert lateral multiplier
+OKY = 0.2 # desert angle multiplier
 MAX_SPEED = 0.5
 SPEED_DROP = 0.00055
 
@@ -192,10 +195,10 @@ class topic_publisher:
 
         cv_image = self.set_state(data)
         action = self.state.choose_action()
-        print("calling back")
-        print("State:", self.state.current_state)
-        print("Action:", action)
-        print("Location:", self.state.current_location)
+        # print("calling back")
+        # print("State:", self.state.current_state)
+        # print("Action:", action)
+        # print("Location:", self.state.current_location)
 
         if (
             action == State.Action.EXPLODE
@@ -360,14 +363,14 @@ class topic_publisher:
             cv_image,
         )
         self.frame_count += 1
-        print("Captured image %d" % self.frame_count)
+        # print("Captured image %d" % self.frame_count)
     
     def capture_images2(self, cv_image):
         cv2.imwrite(
             CAPTURE_PATH + "offroad_images/put_image_%d.png" % self.frame_count,
             cv_image,
         )
-        print("Captured put_image %d" % self.frame_count)
+        # print("Captured put_image %d" % self.frame_count)
 
     def offroad_driving(self, cv_image):
         lost_left = False
@@ -510,15 +513,9 @@ class topic_publisher:
         lost_left = False
         lost_right = False
 
-        lines = self.process_image(cv_image)
+        total_error = 0
 
-        # draw the lines onto the image
-        # for line in lines:
-            # x1, y1, x2, y2 = line[0]
-            # cv2.line(cv_image, (x1, y1), (x2, y2), (0, 255, 0), 1)
-            
-        # cv2.imshow("Desert Image 1", cv_image)
-        # cv2.waitKey(3)
+        lines = self.process_image(cv_image)
 
         if lines is not None:
             # Create a set of unclassified lines with all lines in it
@@ -528,6 +525,17 @@ class topic_publisher:
                 unclassified_lines.add(tuple(line[0]))
 
             left_lines, right_lines = self.classify_sets(unclassified_lines, cv_image)
+
+            for lines in left_lines:
+                x1, y1, x2, y2 = lines
+                cv2.line(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+
+            for lines in right_lines:
+                x1, y1, x2, y2 = lines
+                cv2.line(cv_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
+
+            cv2.imshow("Desert Image", cv_image)
+            cv2.waitKey(3)
 
             if len(left_lines) == 0:
                 lost_left = True
@@ -543,124 +551,168 @@ class topic_publisher:
                 x1, y1, x2, y2 = line
                 cv2.line(cv_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
-        #     # calcualte the error by weighting and averaging the left and right sides
-        #     max_length = np.sqrt(IMAGE_HEIGHT ** 2 + (IMAGE_WIDTH/2) ** 2)
-        #     if len(left_xs) > 0:
-        #         left_value = sum(key * (value/max_length) for key, value in left_xs.items()) / len(
-        #             left_xs
-        #         )
-        #         left_value = np.mean(list(left_xs.keys()))
-        #     if len(right_xs) > 0:
-        #         right_value = sum(key * (value/max_length) for key, value in right_xs.items()) / len(
-        #             right_xs
-        #         )
-        #         right_value = np.mean(list(right_xs.keys()))
+            # calculate the error by representing each side as a single line
+            # Then, find the "moment" of the lines, 
+            # and use that as the error
+            # Lines should have a higher weighting when they are lower
+            # and a lower weighting when they are higher
+            # Lines will have a higher weighting the closer they are to the center
+            # The left and rights lines will have different "neutral"
+            # angles, due to perspective
 
-        #     if len(left_xs) > 0 and len(right_xs) > 0:
-        #         print("left", left_value, "right", right_value)
-        #         error = IMAGE_WIDTH / 2 - np.mean([left_value, right_value])
-        #     elif len(left_xs) > 0:
-        #         lost_right = True
-        #         error = IMAGE_WIDTH / 2 - left_value
-        #     elif len(right_xs) > 0:
-        #         lost_left = True
-        #         error = IMAGE_WIDTH / 2 - right_value
-        # else:
-        #     error = -IMAGE_WIDTH / 2 if self.previous_error < 0 else IMAGE_WIDTH / 2
+            neutral_angle = 45 # degrees
+            neutral_x = IMAGE_WIDTH // 4
+            y_mult_cutoff = IMAGE_HEIGHT - 350
 
-        # # TODO: maybe smooth this out? might not need it idk
-        # if lost_left:  # This will bias the car to the left if the left side is lost
-        #     error = LOSS_FACTOR
-        #     # write onto image
-        #     cv2.putText(
-        #         cv_image,
-        #         "Lost LEFT",
-        #         (10, 50),
-        #         cv2.FONT_HERSHEY_SIMPLEX,
-        #         1,
-        #         (0, 0, 255),
-        #         2,
-        #         cv2.LINE_AA,
-        #     )
-        # if lost_right:
-        #     error = -LOSS_FACTOR
-        #     # write onto image
-        #     cv2.putText(
-        #         cv_image,
-        #         "Lost RIGHT",
-        #         (10, 50),
-        #         cv2.FONT_HERSHEY_SIMPLEX,
-        #         1,
-        #         (0, 0, 255),
-        #         2,
-        #         cv2.LINE_AA,
-        #     )
+            right_error = 0
+            left_error = 0
 
-        # # Print circles showing centroid, middle of screen, and error
-        # if len(left_xs) > 0:
-        #     # red circles showing the centroids
-        #     cv2.circle(
-        #         cv_image,
-        #         (int(left_value), IMAGE_HEIGHT - CROP_AMOUNT),
-        #         5,
-        #         (0, 0, 255),
-        #         -1,
-        #     )
-        # if len(right_xs) > 0:
-        #     cv2.circle(
-        #         cv_image,
-        #         (int(right_value), IMAGE_HEIGHT - CROP_AMOUNT),
-        #         5,
-        #         (0, 0, 255),
-        #         -1,
-        #     )
-        #     # green circle showing the middle of the image
-        #     cv2.circle(
-        #         cv_image,
-        #         (IMAGE_WIDTH // 2, IMAGE_HEIGHT - CROP_AMOUNT),
-        #         5,
-        #         (0, 255, 0),
-        #         -1,
-        #     )
-        # if len(left_xs) > 0 and len(right_xs) > 0:
-        #     # blue circle showing the mean of the centroids
-        #     cv2.circle(
-        #         cv_image,
-        #         (int(np.mean([left_value, right_value])), IMAGE_HEIGHT - CROP_AMOUNT),
-        #         5,
-        #         (255, 0, 0),
-        #         -1,
-        #     )
+            # Find the equivalent line for the left lines by finding the 
+            # bottom and top point
+            if len(left_lines) > 0:
+                y_max = 0
+                y_min = IMAGE_HEIGHT
+                bottom_point = None
+                top_point = None
+                for line in left_lines:
+                    if line[1] > y_max:
+                        y_max = line[1]
+                        bottom_point = line[0:2]
+                    if line[3] > y_max:
+                        y_max = line[3]
+                        bottom_point = line[2:4]
+                    if line[1] < y_min:
+                        y_min = line[1]
+                        top_point = line[0:2]
+                    if line[3] < y_min:
+                        y_min = line[3]
+                        top_point = line[2:4]
 
-        # cv2.putText(
-        #     cv_image,
-        #     str(error),
-        #     (10, 100),
-        #     cv2.FONT_HERSHEY_SIMPLEX,
-        #     1,
-        #     (0, 0, 255),
-        #     2,
-        #     cv2.LINE_AA,
-        # )
-        self.capture_images2(cv_image)
+                # Draw the bottom and top points onto image
+                cv2.circle(cv_image, (bottom_point[0], bottom_point[1]), 5, (0, 0, 255), -1)
+                # Find the center between the two points, aand the slope
+                left_x = (bottom_point[0] + top_point[0]) // 2
+                left_y = (bottom_point[1] + top_point[1]) // 2
+                if top_point[0] == bottom_point[0]:
+                    left_slope = 1000000
+                else:
+                    left_slope = (top_point[1] - bottom_point[1]) / (top_point[0] - bottom_point[0])
+                left_angle = np.arctan(left_slope) * 180 / np.pi # This will output 
+                if left_angle < 0:
+                    left_angle += 180
 
-        # cv2.imshow("Desert Image", cv_image)
-        # cv2.waitKey(3)
+                left_angle = 180 - left_angle
 
-        # PID controller
+                # ERROR IS POSITIVE IF THE CAR NEEDS TO TURN RIGHT
+
+                lateral_error = left_x - neutral_x
+                angle_error = neutral_angle - left_angle
+                # angle_error should be bigger the lower the line is
+                y_mult = max((left_y - y_mult_cutoff)**2 / IMAGE_HEIGHT, 0)
+                # multiply by a confidence factor depending on number of lines
+                # This will be around 0.25 for 1 line, then 0.75 for 2, and 1 for more
+                confidence_factor = min(0.25 + 0.5 * len(left_lines), 1)
+
+                #write words onto image at top left
+                cv2.putText(
+                    cv_image,
+                    "lateral error: %d . angle error: %.1f . y_mult: %.1f" % (lateral_error, angle_error, y_mult),
+                    (10, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+                print("Left angle: ", left_angle)
+
+                print("Left lateral error: %d . Left angle error: %.1f" % (lateral_error*OKX, angle_error*OKY*y_mult))
+
+                left_error = (OKX * lateral_error + OKY * y_mult * angle_error) * confidence_factor
+
+
+            
+            # Find the equivalent line for the right lines by finding the 
+            # bottom and top point
+            if len(right_lines) > 0:
+                y_max = 0
+                y_min = IMAGE_HEIGHT
+                bottom_point = None
+                top_point = None
+                for line in right_lines:
+                    if line[1] > y_max:
+                        y_max = line[1]
+                        bottom_point = line[0:2]
+                    if line[3] > y_max:
+                        y_max = line[3]
+                        bottom_point = line[2:4]
+                    if line[1] < y_min:
+                        y_min = line[1]
+                        top_point = line[0:2]
+                    if line[3] < y_min:
+                        y_min = line[3]
+                        top_point = line[2:4]
+
+
+                cv2.circle(cv_image, (bottom_point[0], bottom_point[1]), 5, (255, 0, 0), -1)
+                # Find the center between the two points, and the slope
+                right_x = (bottom_point[0] + top_point[0]) // 2
+                right_y = (bottom_point[1] + top_point[1]) // 2
+                if top_point[0] == bottom_point[0]:
+                    right_slope = 1000000
+                else:
+                    right_slope = (top_point[1] - bottom_point[1]) / (top_point[0] - bottom_point[0])
+                right_angle = np.arctan(right_slope) * 180 / np.pi # This will output 
+                if right_angle < 0:
+                    right_angle += 180
+                right_angle = 180 - right_angle
+
+
+                print("Right angle: ", right_angle)
+
+                # ERROR IS POSITIVE IF THE CAR NEEDS TO TURN RIGHT
+
+                lateral_error = right_x - (IMAGE_WIDTH-neutral_x)
+                angle_error = (180 - neutral_angle) - right_angle
+                # angle_error should be bigger the lower the line is
+                y_mult = max((right_y - y_mult_cutoff)**2 / IMAGE_HEIGHT, 0)
+                confidence_factor = min(0.25 + 0.5 * len(right_lines), 1)
+
+                right_error = (OKX * lateral_error + OKY * y_mult * angle_error) * confidence_factor
+
+                #write words onto image at bottom right
+                cv2.putText(
+                    cv_image,
+                    "lateral error: %d . angle error: %.1f . y_mult: %.1f" % (lateral_error, angle_error, y_mult),
+                    (IMAGE_WIDTH-900, IMAGE_HEIGHT-50),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+                print("Right lateral error: %d . Right angle error: %.1f" % (lateral_error*OKX, angle_error*OKY*y_mult))
+
+            total_error = left_error + right_error
+
         move = Twist()
 
-        # print("Desert error", error)
-        # derivative = error - self.previous_error
-        # self.previous_error = error
+        print("Desert error", total_error)
+        total_error = -total_error # correct for the way twist works
+        derivative = total_error - self.previous_error
+        self.previous_error = total_error
 
-        # move.angular.z = KP * error + KD * derivative
+        move.angular.z = OKP * KP * total_error + KD * OKD * derivative
         # print("Desert angular speed:", move.angular.z)
 
-        # move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
+        move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(total_error))
         # print("Desert linear speed:", move.linear.x)
 
         self.move_pub.publish(move)
+
+        self.capture_images2(cv_image)
 
     def classify_sets(self, unclassified_lines, cv_image):
         left_lines = set()
@@ -691,12 +743,12 @@ class topic_publisher:
         if left_line is not None:
             left_lines.add(left_line)
             # draw the line onto the image
-            x1, y1, x2, y2 = left_line
+            # x1, y1, x2, y2 = left_line
             # cv2.line(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
         if left_line_2 is not None:
             left_lines_2.add(left_line_2)
-            x1, y1, x2, y2 = left_line_2
+            # x1, y1, x2, y2 = left_line_2
             # cv2.line(cv_image, (x1, y1), (x2, y2), (0, 255, 255), 2)
 
 
@@ -720,18 +772,13 @@ class topic_publisher:
 
         if right_line is not None:
             right_lines.add(right_line)
-            x1, y1, x2, y2 = right_line
+            # x1, y1, x2, y2 = right_line
             # cv2.line(cv_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
         if right_line_2 is not None:
             right_lines_2.add(right_line_2)
-            x1, y1, x2, y2 = right_line_2
+            # x1, y1, x2, y2 = right_line_2
             # cv2.line(cv_image, (x1, y1), (x2, y2), (255, 255, 0), 2)
-
-        print("Right lines equal?", right_lines == right_lines_2)
-        print("Left lines equal?", left_lines == left_lines_2)
-        cv2.imshow("Desert Image", cv_image)
-        cv2.waitKey(3)
         
         # Check between left and right line which is lower - classify that set first
         left_y_max = IMAGE_HEIGHT
@@ -916,7 +963,7 @@ class topic_publisher:
         x1, y1, x2, y2 = line
         x, y = point
 
-        set_threshold = 25
+        set_threshold = 40
 
         # If the point is too far outside the points of the line, return false
         if (x+set_threshold < x1 and x+set_threshold < x2) or (x-set_threshold > x1 and x-set_threshold > x2):
@@ -1014,6 +1061,9 @@ class topic_publisher:
             maxLineGap=20,
         )
 
+        if lines is None:
+            return None
+        
         removedLine = True
         while removedLine:
             # Iterate through each pair of lines in lines
@@ -1032,21 +1082,20 @@ class topic_publisher:
                     break
 
         #Add min_y to the y values of the lines to account for the crop
-        if lines is not None:
-            for line in lines:
-                x1, y1, x2, y2 = line[0]
-                line[0][1] += min_y
-                line[0][3] += min_y
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            line[0][1] += min_y
+            line[0][3] += min_y
 
         return lines
     
     def lines_close(self, line1, line2):
-        # If both points are within 10 pixels of each other, return true
+        # If both points are within 15 pixels of each other, return true
         x1, y1, x2, y2 = line1
         x3, y3, x4, y4 = line2
         distance1 = min(np.sqrt((x1 - x3) ** 2 + (y1 - y3) ** 2), np.sqrt((x1 - x4) ** 2 + (y1 - y4) ** 2))
         distance2 = min(np.sqrt((x2 - x3) ** 2 + (y2 - y3) ** 2), np.sqrt((x2 - x4) ** 2 + (y2 - y4) ** 2))
-        return distance1 < 10 and distance2 < 10
+        return distance1 < 15 and distance2 < 15
 
     def spawn_position(self, position):
         msg = ModelState()
