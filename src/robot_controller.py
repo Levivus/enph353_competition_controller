@@ -228,8 +228,6 @@ class topic_publisher:
         ):
             # self.offroad_driving(cv_image)
             self.offroad_driving2(cv_image)
-            self.capture_images(cv_image)
-            print("past")
         elif action == State.Action.SIT:
             self.avoid_obstacle()
 
@@ -475,10 +473,10 @@ class topic_publisher:
         self.previous_error = error
 
         move.angular.z = OKP * KP * error + KD * derivative
-        # print("Desert angular speed:", move.angular.z)
+        print("Desert angular speed:", move.angular.z)
 
         move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
-        # print("Desert linear speed:", move.linear.x)
+        print("Desert linear speed:", move.linear.x)
 
         self.move_pub.publish(move)
 
@@ -515,7 +513,9 @@ class topic_publisher:
 
         total_error = 0
 
+        start_time = time.time()
         lines = self.process_image(cv_image)
+        print("Time taken to process: ", time.time() - start_time)
 
         if lines is not None:
             # Create a set of unclassified lines with all lines in it
@@ -524,7 +524,9 @@ class topic_publisher:
             for line in lines:
                 unclassified_lines.add(tuple(line[0]))
 
+            start_time = time.time()
             left_lines, right_lines = self.classify_sets(unclassified_lines, cv_image)
+            # print("Time taken to classify: ", time.time() - start_time)
 
             for lines in left_lines:
                 x1, y1, x2, y2 = lines
@@ -537,6 +539,7 @@ class topic_publisher:
             cv2.imshow("Desert Image", cv_image)
             cv2.waitKey(3)
 
+            start_time = time.time()
             if len(left_lines) == 0:
                 lost_left = True
 
@@ -625,9 +628,9 @@ class topic_publisher:
                     cv2.LINE_AA,
                 )
 
-                print("Left angle: ", left_angle)
+                # print("Left angle: ", left_angle)
 
-                print("Left lateral error: %d . Left angle error: %.1f" % (lateral_error*OKX, angle_error*OKY*y_mult))
+                # print("Left lateral error: %d . Left angle error: %.1f" % (lateral_error*OKX, angle_error*OKY*y_mult))
 
                 left_error = (OKX * lateral_error + OKY * y_mult * angle_error) * confidence_factor
 
@@ -669,7 +672,7 @@ class topic_publisher:
                 right_angle = 180 - right_angle
 
 
-                print("Right angle: ", right_angle)
+                # print("Right angle: ", right_angle)
 
                 # ERROR IS POSITIVE IF THE CAR NEEDS TO TURN RIGHT
 
@@ -693,7 +696,7 @@ class topic_publisher:
                     cv2.LINE_AA,
                 )
 
-                print("Right lateral error: %d . Right angle error: %.1f" % (lateral_error*OKX, angle_error*OKY*y_mult))
+                # print("Right lateral error: %d . Right angle error: %.1f" % (lateral_error*OKX, angle_error*OKY*y_mult))
 
             total_error = left_error + right_error
 
@@ -1020,9 +1023,19 @@ class topic_publisher:
     def process_image(self, image):
         image, mask, min_y = self.crop_to_floor(image)
 
+        # Create a copy of the image that is smaller
+        # small_img = cv2.resize(image, (0, 0), fx=0.6, fy=0.6)
+
         # find canny edges for the image and the mask
-        blurred = cv2.bilateralFilter(image, d=9, sigmaColor=75, sigmaSpace=75)
+        start_time = time.time()
+        blurred = cv2.bilateralFilter(image, d=7, sigmaColor=75, sigmaSpace=55)
+        print("Time taken to blur: ", time.time() - start_time)
+
         edges = cv2.Canny(blurred, 50, 150)
+
+        # scale the edges back up to the original size of 1280 by 720
+        # edges = cv2.resize(edges, (0, 0), fx=1.667, fy=1.667)
+
         edges_mask = cv2.Canny(mask, 50, 150)
         
         # dilate edges to help with hough ?
@@ -1064,6 +1077,7 @@ class topic_publisher:
         if lines is None:
             return None
         
+        start_time = time.time()
         removedLine = True
         while removedLine:
             # Iterate through each pair of lines in lines
@@ -1080,6 +1094,7 @@ class topic_publisher:
                         break
                 if removedLine:
                     break
+        print("Time taken to remove lines: ", time.time() - start_time)
 
         #Add min_y to the y values of the lines to account for the crop
         for line in lines:
