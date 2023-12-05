@@ -195,7 +195,7 @@ class topic_publisher:
         Calls the appropriate function based on the state of the robot
         This is the main logic loop of the robot
         """
-        print("calling back")
+        print()
         cv_image = self.set_state(data)
         action = self.state.choose_action()
 
@@ -250,8 +250,6 @@ class topic_publisher:
             cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
         except CvBridgeError as e:
             print(e)
-        # self.capture_images3(cv_image)
-        img = cv_image.copy()
 
         # Check for clues and update the best clue state
         # self.update_clue(cv_image)
@@ -760,14 +758,15 @@ class topic_publisher:
         lower_blue = np.array([0, 0, 0])
         upper_blue = np.array([110, 3, 3])
         image_split = 2
-        pink_thresh = 10
-        pink_thresh2 = 10000
+        pink_thresh = 1
+        pink_thresh2 = 20000
         time_thresh = 0.6
         lower_pink = np.array([200, 0, 200])
         upper_pink = np.array([255, 150, 255])
         lower_tunnel = np.array([80, 100, 185])
         upper_tunnel = np.array([95, 120, 195])
         statey = "blue"
+        set_it_up = False
 
         blue_mask = cv2.inRange(cv_image, lower_blue, upper_blue)
         pink_mask = cv2.inRange(cv_image, lower_pink, upper_pink)
@@ -776,8 +775,8 @@ class topic_publisher:
         pink_pixel_count = cv2.countNonZero(pink_mask)
 
         print("pink pixel count:", pink_pixel_count)
-        print("time", time.time() - self.state.last_pink_time)
-        print(self.tunnel_time)
+        print("time:", time.time() - self.state.last_pink_time)
+        print("Tunnel time:", self.tunnel_time)
 
         contours, _ = cv2.findContours(
             blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
@@ -794,6 +793,7 @@ class topic_publisher:
 
         if (pink_pixel_count > pink_thresh2 or self.tunnel_time) and time.time() - self.state.last_pink_time > time_thresh:
             self.tunnel_time = True
+            set_it_up = True
             statey = "tunnel"
             contours, _ = cv2.findContours(
                 tunnel_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
@@ -801,7 +801,6 @@ class topic_publisher:
 
         if len(contours) > 0:
             if self.tunnel_time:
-                centroids = []
                 x_coordinates = []
                 for contour in contours:
                     # Calculate the moments of the contour
@@ -810,12 +809,7 @@ class topic_publisher:
                     # Calculate centroid coordinates
                     if M['m00'] != 0:
                         cx = int(M['m10'] / M['m00'])
-                        cy = int(M['m01'] / M['m00'])
-                        centroids.append((cx, cy))
                         x_coordinates.append(cx)
-                    else:
-                        # Handle the case where the area is zero (avoid division by zero)
-                        centroids.append(None)
 
                 # Calculate the average x-coordinate
                 if x_coordinates:
@@ -828,7 +822,8 @@ class topic_publisher:
                 if M["m00"] == 0:
                     return
                 centroid_x = int(M["m10"] / M["m00"])
-
+            
+            print("centroid", centroid_x)
             cv2.circle(
                 cv_image,
                 (int(IMAGE_WIDTH / image_split), IMAGE_HEIGHT // 2),
@@ -836,7 +831,7 @@ class topic_publisher:
                 (0, 255, 0),
                 -1,
             )
-            cv2.circle(cv_image, (centroid_x, IMAGE_HEIGHT // 2), 5, (0, 0, 255), -1)
+            cv2.circle(cv_image, (int(centroid_x), IMAGE_HEIGHT // 2), 5, (0, 0, 255), -1)
             cv2.putText(
                 cv_image,
                 str(pink_pixel_count),
@@ -881,6 +876,13 @@ class topic_publisher:
         move.linear.x = max(0, 1 - SPEED_DROP * abs(error))
         # move.linear.x = 0.1
         print("Desert linear speed:", move.linear.x)
+
+        if statey == "pink":
+            move.linear.x = 0.5
+
+        if set_it_up and error > 5:
+            move.linear.x = 0.0
+            move.angular.z = 0.2*KP * error + KD * derivative
 
         self.move_pub.publish(move)
 
