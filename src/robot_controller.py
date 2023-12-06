@@ -28,9 +28,10 @@ import tensorflow as tf
 
 TEAM_NAME = "MchnEarn"
 PASSWORD = "pswd"
-END_TIME = 5000000
+END_TIME = 238
 HOME = [5.5, 2.6, 0.1, 0.0, 0.0, np.sqrt(2), -np.sqrt(2)]
 OFFROAD_TEST = [0.5, -0.5, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
+MOUNTAIN_TEST = [-4.0, -2.35, 0.1, 0.0, 0.0, 0.0, 0.0]
 FIRST_PINK = [0.5, 0.0, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
 DESERT_TEST = [-3.5, 0.45, 0.1, 0.0, 0.0, 1, 0]
 IMAGE_HEIGHT = 720
@@ -45,7 +46,7 @@ LOSS_FACTOR = 200
 RESPAWN_THRESHOLD = 5
 LOWER_PINK = np.array([200, 0, 200], dtype=np.uint8)
 UPPER_PINK = np.array([255, 150, 255], dtype=np.uint8)
-PINK_THRESHOLD = 60000
+PINK_THRESHOLD = 30000
 LOWER_RED = np.array([0, 0, 200], dtype=np.uint8)
 UPPER_RED = np.array([100, 100, 255], dtype=np.uint8)
 RED_THRESHOLD = 60000
@@ -62,13 +63,13 @@ KERNEL_3 = np.ones((3, 3), np.uint8)
 KERNEL_5 = np.ones((5, 5), np.uint8)
 
 # PID CONSTANTS
-KP = 0.017
-KD = 0.003
-OKP = 0.4  # desert KP, multiplies KP
+KP = 0.02
+KD = 0.004
+OKP = 0.45  # desert KP, multiplies KP
 OKD = 1  # desert KD, multiplies KD
 OKX = 1  # desert lateral multiplier
 OKY = 0.2  # desert angle multiplier
-MAX_SPEED = 0.5
+MAX_SPEED = 0.8
 SPEED_DROP = 0.00055
 
 CLUE_TYPES = {
@@ -82,10 +83,8 @@ CLUE_TYPES = {
     "BANDIT": 8,
 }
 
-PATH = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe()))) + "/"
-ABSOLUTE_PATH = "/home/fizzer/ros_ws/src/enph353_competition_controller/src/"
 CAPTURE_PATH = "/home/fizzer/ros_ws/src/enph353_competition_controller/image_testing/"
-
+ABSOLUTE_PATH = "/home/fizzer/ros_ws/src/enph353_competition_controller/src/"
 
 # Some random states, will update later as needed for example, may have
 # multiple driving states (depending on location), a pedestrian stop state,
@@ -125,12 +124,16 @@ class State:
         self.best_clue = np.zeros(
             (IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_DEPTH), dtype=np.uint8
         )
-        self.clue_improved_time = time.time() + 500
+        # MAX INTEGER
+        self.clue_improved_time = np.iinfo(np.int32).max
+        self.currentTime = 0
         self.max_area = 0
         self.current_state = self.NOTHING
+        self.detection_enabled = True
 
     def set_location(self, location):
         self.current_location = location
+        print("Location set to %s" % location)
         self.location_count = self.LOCATIONS.index(location)
 
     def choose_action(self):
@@ -139,15 +142,12 @@ class State:
         elif self.current_state & self.PINK:
             if (
                 self.current_state & self.PINK_ON
-                and time.time() - self.last_pink_time > 5
+                and self.currentTime - self.last_pink_time > 5
             ):
-                self.last_pink_time = time.time()
+                self.last_pink_time = self.currentTime
                 self.current_state &= ~self.PINK_ON
                 self.location_count += 1
                 self.current_location = self.LOCATIONS[self.location_count]
-                # elif time.time() - self.last_pink_time > 5:
-                #     self.location_count += 1
-                #     self.current_location = self.LOCATIONS[self.location_count]
                 return self.Action.DRIVE
         elif self.current_state & self.DRIVING:
             return self.Action.DRIVE
@@ -157,13 +157,12 @@ class State:
 
 class topic_publisher:
     def __init__(self):
+        print("init")
         self.running = False  # Prevent callback from running before competition starts
         self.bridge = CvBridge()
         self.state = State()
-        self.previous_error = -100
+        self.previous_error = 0
         self.fgbg = cv2.createBackgroundSubtractorMOG2()
-        self.frame_count = 0
-        self.state.set_location(self.state.Location.OFFROAD)
         self.tunnel_time = False
 
         self.image_sub = rospy.Subscriber(
@@ -186,18 +185,18 @@ class topic_publisher:
         self.output_details = self.lite_model.get_output_details()
 
         self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
-        self.clock = self.time_start
         self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
         self.running = True
-        self.spawn_position(DESERT_TEST)
-        print("Done init")
+        self.img_count = 0
+        self.spawn_position(HOME)
+        print("init done")
 
     def clock_callback(self, data):
         """Callback for the clock subscriber
         Publishes the score to the score tracker node when the competition ends
         """
-        self.clock = data.clock.secs
-        if self.running and self.clock - self.time_start > END_TIME:
+        self.state.currentTime = data.clock.secs + data.clock.nsecs / 1000000000
+        if self.running and self.state.currentTime > END_TIME:
             self.running = False
             self.score_pub.publish("%s,%s,-1,NA" % (TEAM_NAME, PASSWORD))
 
@@ -206,7 +205,7 @@ class topic_publisher:
         Calls the appropriate function based on the state of the robot
         This is the main logic loop of the robot
         """
-        print()
+        
         cv_image = self.set_state(data)
         action = self.state.choose_action()
 
@@ -221,12 +220,11 @@ class topic_publisher:
             self.image_difference = np.mean((new_image - self.last_image) ** 2)
             if (
                 self.image_difference < RESPAWN_THRESHOLD
-                and self.clock - self.time_start > 10
+                and self.state.currentTime - self.time_start > 10
             ):
                 self.spawn_position(HOME)
                 self.state.current_state = self.state.DRIVING
                 self.state.set_location(State.Location.ROAD)
-                print("Respawned")
             self.last_image = new_image
 
         if (
@@ -262,10 +260,11 @@ class topic_publisher:
         self.update_clue(cv_image)
 
         # If the clue has not improved in 3 seconds, find the letters, and reset the max area
-        if time.time() - self.state.clue_improved_time > 2:
+        if self.state.currentTime - self.state.clue_improved_time > 2:
+            print("Submitting clue")
             self.submit_clue()
             self.state.clue_improved_time = (
-                time.time() + 300
+                self.state.currentTime + 300
             )  # Set the time after comp, so it doesn't submit again
             self.state.max_area = 0
 
@@ -273,31 +272,24 @@ class topic_publisher:
         # Pink
         pink_mask = cv2.inRange(cv_image, LOWER_PINK, UPPER_PINK)
         pink_pixel_count = cv2.countNonZero(pink_mask)
-        # print("Pink pixel count:", pink_pixel_count)
-        # Red
-        # red_mask = cv2.inRange(cv_image, LOWER_RED, UPPER_RED)
-        # red_pixel_count = cv2.countNonZero(red_mask)
-        # print("Red pixel count:", red_pixel_count)
 
         # Create a local state that will be added by bitwise OR
         state = 0b00000000
 
-        # if self.obstacle_detection(cv_image) and self.state.current_location == State.Location.ROAD:
-        #     state |= self.state.OBSTACLE
+        if self.obstacle_detection(cv_image):
+            print("OBSTACLE DETECTED")  
+            state |= self.state.OBSTACLE
 
         if pink_pixel_count > PINK_THRESHOLD:
             state |= self.state.PINK
             if (self.state.last_state & self.state.PINK) == 0:
                 state |= self.state.PINK_ON
-        # if red_pixel_count > RED_THRESHOLD:
-        #     state |= self.state.OBSTACLE
-
+                
         state |= self.state.DRIVING
 
         self.state.last_state = self.state.current_state
         self.state.current_state = state
 
-        # print("state:", self.state.current_state)
         return cv_image
 
     def driving(self, cv_image):
@@ -307,7 +299,7 @@ class topic_publisher:
 
         mask = cv2.inRange(cv_image, LOWER_ROAD, UPPER_ROAD)
 
-        mask = mask[IMAGE_HEIGHT - CROP_AMOUNT :, :]
+        mask = mask[IMAGE_HEIGHT - CROP_AMOUNT:IMAGE_HEIGHT - CROP_AMOUNT + 100, :]
 
         # find where the road x position is
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -323,13 +315,12 @@ class topic_publisher:
             else:
                 M = cv2.moments(largest_contour)
                 if M["m00"] == 0:
-                    # print(contours)
                     return
                 centroid_x = int(M["m10"] / M["m00"])
                 y_offset = IMAGE_HEIGHT - CROP_AMOUNT
                 largest_contour[:, 0, 1] += y_offset
                 # draw contour onto image
-                cv2.drawContours(cv_image, [largest_contour], -1, contour_colour, 2)
+                # cv2.drawContours(cv_image, [largest_contour], -1, contour_colour, 2)
                 # calculate the error
                 error = (
                     centroid_x - IMAGE_WIDTH / 2
@@ -353,22 +344,19 @@ class topic_publisher:
                 cv2.LINE_AA,
             )
 
-        cv2.imshow("Driving Image", cv_image)
-        cv2.waitKey(3)
+        # cv2.imshow("Driving Image", cv_image)
+        # cv2.waitKey(3)
 
         # PID controller
         move = Twist()
 
-        # print("Road error", error)
         derivative = error - self.previous_error
         self.previous_error = error
 
         move.angular.z = -(KP * error + KD * derivative)
-        # print("Road angular speed:", move.angular.z)
 
         # decrease linear speed as angular speed increases from a max of 3 down to 1.xx? if abs(error) > 400
         move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
-        # print("Road linear speed:", move.linear.x)
 
         self.move_pub.publish(move)
 
@@ -392,23 +380,8 @@ class topic_publisher:
                 x1, y1, x2, y2 = lines
                 cv2.line(cv_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
-            cv2.imshow("Desert Image", cv_image)
-            cv2.waitKey(3)
-
-            start_time = time.time()
-            if len(left_lines) == 0:
-                lost_left = True
-
-            if len(right_lines) == 0:
-                lost_right = True
-
-            for line in left_lines:
-                x1, y1, x2, y2 = line
-                cv2.line(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
-
-            for line in right_lines:
-                x1, y1, x2, y2 = line
-                cv2.line(cv_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
+            # cv2.imshow("Desert Image", cv_image)
+            # cv2.waitKey(3)
 
             # calculate the error by representing each side as a single line
             # Then, find the "moment" of the lines,
@@ -421,7 +394,7 @@ class topic_publisher:
 
             neutral_angle = 45  # degrees
             neutral_x = IMAGE_WIDTH // 4
-            y_mult_cutoff = IMAGE_HEIGHT - 350
+            y_mult_cutoff = IMAGE_HEIGHT - 300
 
             right_error = 0
             left_error = 0
@@ -473,25 +446,8 @@ class topic_publisher:
                 # angle_error should be bigger the lower the line is
                 y_mult = max((left_y - y_mult_cutoff) ** 2 / IMAGE_HEIGHT, 0)
                 # multiply by a confidence factor depending on number of lines
-                # This will be around 0.25 for 1 line, then 0.75 for 2, and 1 for more
-                confidence_factor = min(0.25 + 0.5 * len(left_lines), 1)
-
-                # write words onto image at top left
-                cv2.putText(
-                    cv_image,
-                    "lateral error: %d . angle error: %.1f . y_mult: %.1f"
-                    % (lateral_error, angle_error, y_mult),
-                    (10, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (0, 0, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
-
-                # print("Left angle: ", left_angle)
-
-                # print("Left lateral error: %d . Left angle error: %.1f" % (lateral_error*OKX, angle_error*OKY*y_mult))
+                # This will be around 0.25 for 1 line, then 0.5 for 2, and 1 for more
+                confidence_factor = min(0.25 + 0.25 * len(left_lines), 1)
 
                 left_error = (
                     OKX * lateral_error + OKY * y_mult * angle_error
@@ -535,8 +491,6 @@ class topic_publisher:
                     right_angle += 180
                 right_angle = 180 - right_angle
 
-                # print("Right angle: ", right_angle)
-
                 # ERROR IS POSITIVE IF THE CAR NEEDS TO TURN RIGHT
 
                 lateral_error = right_x - (IMAGE_WIDTH - neutral_x)
@@ -562,9 +516,19 @@ class topic_publisher:
                     cv2.LINE_AA,
                 )
 
-                # print("Right lateral error: %d . Right angle error: %.1f" % (lateral_error*OKX, angle_error*OKY*y_mult))
-
             total_error = left_error + right_error
+
+            # Draw error onto image
+            cv2.putText(
+                cv_image,
+                "Total error: %d" % total_error,
+                (10, IMAGE_HEIGHT - 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
 
         move = Twist()
 
@@ -573,10 +537,13 @@ class topic_publisher:
         self.previous_error = total_error
 
         move.angular.z = OKP * KP * total_error + KD * OKD * derivative
-        # print("Desert angular speed:", move.angular.z)
+        cv2.putText(cv_image, "Angular velocity: %.2f" % move.angular.z, (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
 
         move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(total_error))
-        # print("Desert linear speed:", move.linear.x)
+
+        # Save the image
+        cv2.imwrite(CAPTURE_PATH + "offroad%d.png" % self.img_count, cv_image)
+        self.img_count += 1
 
         self.move_pub.publish(move)
 
@@ -614,14 +581,9 @@ class topic_publisher:
 
         if left_line is not None:
             left_lines.add(left_line)
-            # draw the line onto the image
-            # x1, y1, x2, y2 = left_line
-            # cv2.line(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
         if left_line_2 is not None:
             left_lines_2.add(left_line_2)
-            # x1, y1, x2, y2 = left_line_2
-            # cv2.line(cv_image, (x1, y1), (x2, y2), (0, 255, 255), 2)
 
         # classify the first and second right lines
         right_line = None
@@ -646,13 +608,9 @@ class topic_publisher:
 
         if right_line is not None:
             right_lines.add(right_line)
-            # x1, y1, x2, y2 = right_line
-            # cv2.line(cv_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
         if right_line_2 is not None:
             right_lines_2.add(right_line_2)
-            # x1, y1, x2, y2 = right_line_2
-            # cv2.line(cv_image, (x1, y1), (x2, y2), (255, 255, 0), 2)
 
         # Check between left and right line which is lower - classify that set first
         left_y_max = IMAGE_HEIGHT
@@ -833,16 +791,13 @@ class topic_publisher:
         return image[min_y:, :], total_mask[min_y:, :], min_y
 
     def process_image(self, image):
-        start_time = time.time()
         image, mask, min_y = self.crop_to_floor(image)
 
         # find canny edges for the image and the mask
 
-        start_time = time.time()
         blurred = cv2.bilateralFilter(image, d=7, sigmaColor=75, sigmaSpace=55)
-        print("Time taken to blur bilateral: ", time.time() - start_time)
+        blurred = cv2.bilateralFilter(blurred, d=7, sigmaColor=75, sigmaSpace=55)
 
-        start_time = time.time()
         edges = cv2.Canny(blurred, 50, 150)
 
         edges_mask = cv2.Canny(mask, 50, 150)
@@ -852,10 +807,7 @@ class topic_publisher:
 
         # remove edeges from edges that are also in edges_mask
         edges[edges_mask == 255] = 0
-        
-        print("Time taken to find edges: ", time.time() - start_time)
 
-        start_time = time.time()
         # Use Hough Line Transform to find line segments on the edges
         lines = cv2.HoughLinesP(
             edges, 1, np.pi / 180, threshold=50, minLineLength=20, maxLineGap=20
@@ -881,8 +833,6 @@ class topic_publisher:
             maxLineGap=20,
         )
 
-        print("Time taken to find lines: ", time.time() - start_time)
-
         if lines is None:
             return None
 
@@ -895,6 +845,10 @@ class topic_publisher:
         return lines
       
     def desert(self, cv_image):
+        if self.state.currentTime - self.state.last_pink_time < 0.5:
+            self.offroad_driving2(cv_image) 
+            return
+
         lower_blue = np.array([0, 0, 0])
         upper_blue = np.array([110, 3, 3])
         image_split = 2
@@ -914,24 +868,20 @@ class topic_publisher:
         tunnel_mask = cv2.dilate(tunnel_mask, np.ones((3,3),np.uint8),iterations = 5)
         pink_pixel_count = cv2.countNonZero(pink_mask)
 
-        print("pink pixel count:", pink_pixel_count)
-        print("time:", time.time() - self.state.last_pink_time)
-        print("Tunnel time:", self.tunnel_time)
-
         contours, _ = cv2.findContours(
             blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
         if (
             pink_pixel_count > pink_thresh
-            and time.time() - self.state.last_pink_time > time_thresh
+            and self.state.currentTime - self.state.last_pink_time > time_thresh
         ):
             statey = "pink"
             contours, _ = cv2.findContours(
                 pink_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
 
-        if (pink_pixel_count > pink_thresh2 or self.tunnel_time) and time.time() - self.state.last_pink_time > time_thresh:
+        if (pink_pixel_count > pink_thresh2 or self.tunnel_time) and self.state.currentTime - self.state.last_pink_time > time_thresh:
             self.tunnel_time = True
             set_it_up = True
             statey = "tunnel"
@@ -957,13 +907,12 @@ class topic_publisher:
 
             else:
                 max_contour = max(contours, key=cv2.contourArea)
-                cv2.drawContours(cv_image, [max_contour], -1, (0, 0, 255), 2)
+                # cv2.drawContours(cv_image, [max_contour], -1, (0, 0, 255), 2)
                 M = cv2.moments(max_contour)
                 if M["m00"] == 0:
                     return
                 centroid_x = int(M["m10"] / M["m00"])
             
-            print("centroid", centroid_x)
             cv2.circle(
                 cv_image,
                 (int(IMAGE_WIDTH / image_split), IMAGE_HEIGHT // 2),
@@ -996,26 +945,15 @@ class topic_publisher:
             error = IMAGE_WIDTH / image_split - centroid_x
         else:
             error = IMAGE_WIDTH / image_split
-        print("error", error)
-
-        self.capture_images3(cv_image)
-
-        cv2.imshow("Desert Mask", tunnel_mask)
-        cv2.imshow("Desert Image", cv_image)
-        cv2.waitKey(3)
 
         move = Twist()
-        # print("Desert error", error)
         derivative = error - self.previous_error
         self.previous_error = error
 
         # positive means the car should turn right
         move.angular.z = KP * error + KD * derivative
-        print("Desert angular speed:", move.angular.z)
 
         move.linear.x = max(0, 1 - SPEED_DROP * abs(error))
-        # move.linear.x = 0.1
-        print("Desert linear speed:", move.linear.x)
 
         if statey == "pink":
             move.linear.x = 0.5
@@ -1038,7 +976,7 @@ class topic_publisher:
             np.sqrt((x2 - x3) ** 2 + (y2 - y3) ** 2),
             np.sqrt((x2 - x4) ** 2 + (y2 - y4) ** 2),
         )
-        return distance1 < 15 and distance2 < 15
+        return distance1 < 25 and distance2 < 25
 
     def spawn_position(self, position):
         msg = ModelState()
@@ -1103,7 +1041,7 @@ class topic_publisher:
             # and reset the time since the clue improved
             if clue_size > self.state.max_area:
                 self.state.max_area = clue_size
-                self.state.clue_improved_time = time.time()
+                self.state.clue_improved_time = self.state.currentTime
 
                 # Template that the clue will be warped onto
                 clue = np.zeros((400, 600, 3), np.uint8)
@@ -1136,8 +1074,8 @@ class topic_publisher:
         # cv2.imshow("Best Clue", self.state.best_clue)
         # Get the words from the clue
         type, clue = self.find_words()
-        print("TYPE:", type)
-        print("CLUE:", clue)
+
+        print("Clue: %s" % clue)
 
         # Find clue number using the type dictionary
         # In case the type is not found exactly, find the closest match
@@ -1154,6 +1092,15 @@ class topic_publisher:
 
         # Publish the clue
         self.score_pub.publish("%s,%s,%d,%s" % (TEAM_NAME, PASSWORD, type_num, clue))
+
+        if type_num == 4:
+            self.state.detection_enabled = False
+        elif type_num == 8:
+            time.sleep(0.1)
+            self.score_pub.publish("%s,%s,%d,%s" % (TEAM_NAME, PASSWORD, -1, "NA"))
+            time.sleep(0.1)
+            # stop the script
+            sys.exit()
 
     def find_words(self):
         clue = self.state.best_clue
@@ -1230,7 +1177,6 @@ class topic_publisher:
                 clueBoundingBoxes.remove(clueBoundingBoxes[i])
                 clueBoundingBoxes.insert(i, box1)
                 clueBoundingBoxes.insert(i + 1, box2)
-                print("SPLIT LETTERS!")
 
         for i in range(len(typeBoundingBoxes)):
             if typeBoundingBoxes[i][2] > 60:
@@ -1249,7 +1195,6 @@ class topic_publisher:
                 typeBoundingBoxes.remove(typeBoundingBoxes[i])
                 typeBoundingBoxes.insert(i, box1)
                 typeBoundingBoxes.insert(i + 1, box2)
-                print("SPLIT LETTERS!")
 
         # Letter Template
         letter = np.zeros((130, 80, 3), np.uint8)
@@ -1302,8 +1247,6 @@ class topic_publisher:
         letter_imgs = np.expand_dims(np.array(letter_imgs), axis=-1)
 
         outputs = []
-
-        print("FOUND LETTERS, BEGINNING PREDICTION")
 
         self.lite_model.resize_tensor_input(
             self.lite_model.get_input_details()[0]["index"],
@@ -1361,34 +1304,13 @@ class topic_publisher:
 
         # check how many pixels on in the image
         pixel_count = cv2.countNonZero(segmented_image)
-        # print("pixel count:", pixel_count)
-        detected = pixel_count > OBSTACLE_THRESHOLD
-        if detected:
-            print("OBSTACLE DETECTED")
-        cv2.putText(
-            frame,
-            "OBSTACLE DETECTED" + str(detected),
-            (10, 50),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 0, 255),
-            2,
-            cv2.LINE_AA,
-        )
-        # cv2.imshow("Frame post-erode", frame)
 
-        return detected
-
-        # TODO: Implement this when we figure out what to do/ if we figure it out...
+        return pixel_count > OBSTACLE_THRESHOLD and self.state.detection_enabled        
 
     # TODO: Test this and prob do something better then stop? also only works for road rn, gets tripped up on offroad
     def avoid_obstacle(self):
         """Function for avoiding obsatcle"""
-        start_time = time.time()
-        move = Twist()
-        move.angular.z = 0.0
-        move.linear.x = 0.0
-        self.move_pub.publish(move)
+        self.move_pub.publish(Twist())
 
     def find_clue_corners(self, clue_border):
         # Simplify the contour to 4 points
@@ -1439,7 +1361,6 @@ class topic_publisher:
 
 
 def main(args):
-    print("main")
     rospy.init_node("topic_publisher")
     topic_publisher()
     try:
@@ -1447,7 +1368,6 @@ def main(args):
     except KeyboardInterrupt:
         print("Shutting down")
     cv2.destroyAllWindows()
-    print("main done")
 
 
 if __name__ == "__main__":
