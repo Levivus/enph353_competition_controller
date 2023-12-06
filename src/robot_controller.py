@@ -32,6 +32,7 @@ END_TIME = 5000000
 HOME = [5.5, 2.6, 0.1, 0.0, 0.0, np.sqrt(2), -np.sqrt(2)]
 OFFROAD_TEST = [0.5, -0.5, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
 FIRST_PINK = [0.5, 0.0, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
+DESERT_TEST = [-3.5, 0.45, 0.1, 0.0, 0.0, 1, 0]
 IMAGE_HEIGHT = 720
 IMAGE_WIDTH = 1280
 IMAGE_DEPTH = 3
@@ -162,6 +163,8 @@ class topic_publisher:
         self.previous_error = -100
         self.fgbg = cv2.createBackgroundSubtractorMOG2()
         self.frame_count = 0
+        self.state.set_location(self.state.Location.OFFROAD)
+        self.tunnel_time = False
 
         self.image_sub = rospy.Subscriber(
             "R1/pi_camera/image_raw", Image, self.callback
@@ -186,7 +189,7 @@ class topic_publisher:
         self.clock = self.time_start
         self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
         self.running = True
-        self.spawn_position(OFFROAD_TEST)
+        self.spawn_position(DESERT_TEST)
         print("Done init")
 
     def clock_callback(self, data):
@@ -203,13 +206,9 @@ class topic_publisher:
         Calls the appropriate function based on the state of the robot
         This is the main logic loop of the robot
         """
-
+        print()
         cv_image = self.set_state(data)
         action = self.state.choose_action()
-        # print("calling back")
-        # print("State:", self.state.current_state)
-        # print("Action:", action)
-        # print("Location:", self.state.current_location)
 
         if (
             action == State.Action.EXPLODE
@@ -220,7 +219,6 @@ class topic_publisher:
         if self.running:
             new_image = np.array(cv_image)
             self.image_difference = np.mean((new_image - self.last_image) ** 2)
-            # print("Image difference:", self.image_difference)
             if (
                 self.image_difference < RESPAWN_THRESHOLD
                 and self.clock - self.time_start > 10
@@ -240,8 +238,12 @@ class topic_publisher:
             action == State.Action.DRIVE
             and self.state.current_location == State.Location.OFFROAD
         ):
-            # self.offroad_driving(cv_image)
             self.offroad_driving2(cv_image)
+        elif (
+            action == State.Action.DRIVE
+            and self.state.current_location == State.Location.DESERT
+        ):
+            self.desert(cv_image)
         elif action == State.Action.SIT:
             self.avoid_obstacle()
 
@@ -370,41 +372,16 @@ class topic_publisher:
 
         self.move_pub.publish(move)
 
-    # write a function that saves an image to a folder location
-    def capture_images(self, cv_image):
-        cv2.imwrite(
-            CAPTURE_PATH + "offroad_images/image_%d.png" % self.frame_count,
-            cv_image,
-        )
-        self.frame_count += 1
-        # print("Captured image %d" % self.frame_count)
-
-    def capture_images2(self, cv_image):
-        cv2.imwrite(
-            CAPTURE_PATH + "offroad_images/put_image_%d.png" % self.frame_count,
-            cv_image,
-        )
-        # print("Captured put_image %d" % self.frame_count)
-
     def offroad_driving2(self, cv_image):
-        lost_left = False
-        lost_right = False
-
         total_error = 0
 
-        start_time = time.time()
         lines = self.process_image(cv_image)
-        print("Time taken to process: ", time.time() - start_time)
 
         if lines is not None:
-            # Create a set of unclassified lines with all lines in it
-            # The line[0]'s are in the form [x1, y1, x2, y2]
             unclassified_lines = set()
             for line in lines:
                 unclassified_lines.add(tuple(line[0]))
-
-            start_time = time.time()
-            start_time = time.time()
+                
             left_lines, right_lines = self.classify_sets(unclassified_lines)
 
             for lines in left_lines:
@@ -603,7 +580,6 @@ class topic_publisher:
 
         self.move_pub.publish(move)
 
-        # self.capture_images2(cv_image)
 
     def classify_sets(self, unclassified_lines):
         left_lines = set()
@@ -917,7 +893,139 @@ class topic_publisher:
             line[0][3] += min_y
 
         return lines
+      
+    def desert(self, cv_image):
+        lower_blue = np.array([0, 0, 0])
+        upper_blue = np.array([110, 3, 3])
+        image_split = 2
+        pink_thresh = 1
+        pink_thresh2 = 20000
+        time_thresh = 0.6
+        lower_pink = np.array([200, 0, 200])
+        upper_pink = np.array([255, 150, 255])
+        lower_tunnel = np.array([80, 100, 185])
+        upper_tunnel = np.array([95, 120, 195])
+        statey = "blue"
+        set_it_up = False
 
+        blue_mask = cv2.inRange(cv_image, lower_blue, upper_blue)
+        pink_mask = cv2.inRange(cv_image, lower_pink, upper_pink)
+        tunnel_mask = cv2.inRange(cv_image, lower_tunnel, upper_tunnel)
+        tunnel_mask = cv2.dilate(tunnel_mask, np.ones((3,3),np.uint8),iterations = 5)
+        pink_pixel_count = cv2.countNonZero(pink_mask)
+
+        print("pink pixel count:", pink_pixel_count)
+        print("time:", time.time() - self.state.last_pink_time)
+        print("Tunnel time:", self.tunnel_time)
+
+        contours, _ = cv2.findContours(
+            blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        if (
+            pink_pixel_count > pink_thresh
+            and time.time() - self.state.last_pink_time > time_thresh
+        ):
+            statey = "pink"
+            contours, _ = cv2.findContours(
+                pink_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+
+        if (pink_pixel_count > pink_thresh2 or self.tunnel_time) and time.time() - self.state.last_pink_time > time_thresh:
+            self.tunnel_time = True
+            set_it_up = True
+            statey = "tunnel"
+            contours, _ = cv2.findContours(
+                tunnel_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+
+        if len(contours) > 0:
+            if self.tunnel_time:
+                x_coordinates = []
+                for contour in contours:
+                    # Calculate the moments of the contour
+                    M = cv2.moments(contour)
+
+                    # Calculate centroid coordinates
+                    if M['m00'] != 0:
+                        cx = int(M['m10'] / M['m00'])
+                        x_coordinates.append(cx)
+
+                # Calculate the average x-coordinate
+                if x_coordinates:
+                    centroid_x = np.mean(x_coordinates)
+
+            else:
+                max_contour = max(contours, key=cv2.contourArea)
+                cv2.drawContours(cv_image, [max_contour], -1, (0, 0, 255), 2)
+                M = cv2.moments(max_contour)
+                if M["m00"] == 0:
+                    return
+                centroid_x = int(M["m10"] / M["m00"])
+            
+            print("centroid", centroid_x)
+            cv2.circle(
+                cv_image,
+                (int(IMAGE_WIDTH / image_split), IMAGE_HEIGHT // 2),
+                5,
+                (0, 255, 0),
+                -1,
+            )
+            cv2.circle(cv_image, (int(centroid_x), IMAGE_HEIGHT // 2), 5, (0, 0, 255), -1)
+            cv2.putText(
+                cv_image,
+                str(pink_pixel_count),
+                (10, 100),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                cv_image,
+                statey,
+                (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+            error = IMAGE_WIDTH / image_split - centroid_x
+        else:
+            error = IMAGE_WIDTH / image_split
+        print("error", error)
+
+        self.capture_images3(cv_image)
+
+        cv2.imshow("Desert Mask", tunnel_mask)
+        cv2.imshow("Desert Image", cv_image)
+        cv2.waitKey(3)
+
+        move = Twist()
+        # print("Desert error", error)
+        derivative = error - self.previous_error
+        self.previous_error = error
+
+        # positive means the car should turn right
+        move.angular.z = KP * error + KD * derivative
+        print("Desert angular speed:", move.angular.z)
+
+        move.linear.x = max(0, 1 - SPEED_DROP * abs(error))
+        # move.linear.x = 0.1
+        print("Desert linear speed:", move.linear.x)
+
+        if statey == "pink":
+            move.linear.x = 0.5
+
+        if set_it_up and error > 5:
+            move.linear.x = 0.0
+            move.angular.z = 0.2*KP * error + KD * derivative
+
+        self.move_pub.publish(move)
+        
     def lines_same(self, line1, line2):
         # If both points are within 15 pixels of each other, return true
         x1, y1, x2, y2 = line1
