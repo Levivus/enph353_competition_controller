@@ -13,8 +13,10 @@ from enum import Enum
 from gazebo_msgs.msg import ModelState
 from gazebo_msgs.srv import SetModelState
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 
-# import Levenshtein
+import Levenshtein
 
 import os
 import os.path
@@ -28,7 +30,7 @@ TEAM_NAME = "MchnEarn"
 PASSWORD = "pswd"
 END_TIME = 5000000
 HOME = [5.5, 2.6, 0.1, 0.0, 0.0, np.sqrt(2), -np.sqrt(2)]
-OFFROAD_TEST = [0.5, -1.0, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
+OFFROAD_TEST = [0.5, -0.5, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
 FIRST_PINK = [0.5, 0.0, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
 DESERT_TEST = [-3.5, 0.45, 0.1, 0.0, 0.0, 1, 0]
 IMAGE_HEIGHT = 720
@@ -51,11 +53,21 @@ LOWER_ROAD = np.array([0, 0, 78], dtype=np.uint8)
 UPPER_ROAD = np.array([125, 135, 255], dtype=np.uint8)
 LOWER_DIRT = np.array([140, 164, 168], dtype=np.uint8)
 UPPER_DIRT = np.array([186, 220, 228], dtype=np.uint8)
+FLOOR_LOWER_HSV = np.array([6, 23, 118])
+FLOOR_UPPER_HSV = np.array([84, 255, 255])
+GREEN_LOWER = np.array([60, 136, 25])
+GREEN_UPPER = np.array([75, 145, 35])
+KERNEL_2 = np.ones((2, 2), np.uint8)
+KERNEL_3 = np.ones((3, 3), np.uint8)
+KERNEL_5 = np.ones((5, 5), np.uint8)
 
 # PID CONSTANTS
 KP = 0.017
 KD = 0.003
 OKP = 0.4  # desert KP, multiplies KP
+OKD = 1  # desert KD, multiplies KD
+OKX = 1  # desert lateral multiplier
+OKY = 0.2  # desert angle multiplier
 MAX_SPEED = 0.5
 SPEED_DROP = 0.00055
 
@@ -166,12 +178,15 @@ class topic_publisher:
         time.sleep(1)
         self.move_pub.publish(Twist())
 
-        self.lite_model = tf.lite.Interpreter(model_path=ABSOLUTE_PATH + "quantized_model.tflite")
+        self.lite_model = tf.lite.Interpreter(
+            model_path=ABSOLUTE_PATH + "quantized_model.tflite"
+        )
         self.lite_model.allocate_tensors()
         self.input_details = self.lite_model.get_input_details()
         self.output_details = self.lite_model.get_output_details()
 
         self.time_start = rospy.wait_for_message("/clock", Clock).clock.secs
+        self.clock = self.time_start
         self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
         self.running = True
         self.spawn_position(DESERT_TEST)
@@ -181,7 +196,8 @@ class topic_publisher:
         """Callback for the clock subscriber
         Publishes the score to the score tracker node when the competition ends
         """
-        if self.running and data.clock.secs - self.time_start > END_TIME:
+        self.clock = data.clock.secs
+        if self.running and self.clock - self.time_start > END_TIME:
             self.running = False
             self.score_pub.publish("%s,%s,-1,NA" % (TEAM_NAME, PASSWORD))
 
@@ -194,10 +210,6 @@ class topic_publisher:
         cv_image = self.set_state(data)
         action = self.state.choose_action()
 
-        # print("State:", self.state.current_state)
-        # print("Action:", action)
-        # print("Location:", self.state.current_location)
-
         if (
             action == State.Action.EXPLODE
         ):  # TODO: shut down the script? - may not even need this state once this is implemented
@@ -207,8 +219,10 @@ class topic_publisher:
         if self.running:
             new_image = np.array(cv_image)
             self.image_difference = np.mean((new_image - self.last_image) ** 2)
-            # print("Image difference:", self.image_difference)
-            if self.image_difference < RESPAWN_THRESHOLD:
+            if (
+                self.image_difference < RESPAWN_THRESHOLD
+                and self.clock - self.time_start > 10
+            ):
                 self.spawn_position(HOME)
                 self.state.current_state = self.state.DRIVING
                 self.state.set_location(State.Location.ROAD)
@@ -224,9 +238,7 @@ class topic_publisher:
             action == State.Action.DRIVE
             and self.state.current_location == State.Location.OFFROAD
         ):
-            # self.offroad_driving(cv_image)
-            # self.offroad_driving2(cv_image)
-            self.test()
+            self.offroad_driving2(cv_image)
         elif (
             action == State.Action.DRIVE
             and self.state.current_location == State.Location.DESERT
@@ -247,12 +259,14 @@ class topic_publisher:
             print(e)
 
         # Check for clues and update the best clue state
-        # self.update_clue(cv_image)
+        self.update_clue(cv_image)
 
         # If the clue has not improved in 3 seconds, find the letters, and reset the max area
         if time.time() - self.state.clue_improved_time > 2:
             self.submit_clue()
-            self.state.clue_improved_time = time.time()+300 # Set the time after comp, so it doesn't submit again
+            self.state.clue_improved_time = (
+                time.time() + 300
+            )  # Set the time after comp, so it doesn't submit again
             self.state.max_area = 0
 
         # Generating masks to check for certain colurs
@@ -358,362 +372,490 @@ class topic_publisher:
 
         self.move_pub.publish(move)
 
-    # write a function that saves an image to a folder location
-    def capture_images(self, cv_image):
-        cv2.imwrite(
-            CAPTURE_PATH + "offroad_images/image_%d.png" % self.frame_count,
-            cv_image,
-        )
-        self.frame_count += 1
-        print("Captured image %d" % self.frame_count)
+    def offroad_driving2(self, cv_image):
+        total_error = 0
 
-    def capture_images2(self, cv_image):
-        cv2.imwrite(
-            CAPTURE_PATH + "offroad_images/put_image_%d.png" % self.frame_count,
-            cv_image,
-        )
-        print("Captured put_image %d" % self.frame_count)
+        lines = self.process_image(cv_image)
 
-    def capture_images3(self, cv_image):
-        cv2.imwrite(
-            CAPTURE_PATH + "desert_images/image_%d.png" % self.frame_count,
-            cv_image,
-        )
-        print("Captured image %d" % self.frame_count)
-        self.frame_count += 1
+        if lines is not None:
+            unclassified_lines = set()
+            for line in lines:
+                unclassified_lines.add(tuple(line[0]))
+                
+            left_lines, right_lines = self.classify_sets(unclassified_lines)
 
-    def test(self):
-        move = Twist()
-        move.linear.x = 0.3
-        self.move_pub.publish(move)
+            for lines in left_lines:
+                x1, y1, x2, y2 = lines
+                cv2.line(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
-    def offroad_driving(self, cv_image):
-        lost_left = False
-        lost_right = False
-        contour_colour = (0, 0, 255)
+            for lines in right_lines:
+                x1, y1, x2, y2 = lines
+                cv2.line(cv_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
-        top_2_contours = self.process_image(cv_image)
-        cv2.drawContours(cv_image, top_2_contours, -1, contour_colour, 2)
+            cv2.imshow("Desert Image", cv_image)
+            cv2.waitKey(3)
 
-        centroids = []
-        if len(top_2_contours) > 1:
-            # get the centroids of the two largest contours
-            for i in range(len(top_2_contours)):
-                M = cv2.moments(top_2_contours[i])
-                if M["m00"] == 0:
-                    return
-                centroids.append(int(M["m10"] / M["m00"]))
-
-            if centroids[0] < IMAGE_WIDTH // 2 and centroids[1] < IMAGE_WIDTH // 2:
-                lost_right = True
-            elif centroids[0] > IMAGE_WIDTH // 2 and centroids[1] > IMAGE_WIDTH // 2:
+            start_time = time.time()
+            if len(left_lines) == 0:
                 lost_left = True
 
-            # positive means the car should turn left
-            error = IMAGE_WIDTH / 2 - np.mean(centroids)
-        else:
-            error = -IMAGE_WIDTH / 2 if self.previous_error < 0 else IMAGE_WIDTH / 2
+            if len(right_lines) == 0:
+                lost_right = True
 
-        # TODO: maybe smooth this out? might not need it idk
-        if lost_left:  # This will bias the car to the left if the left side is lost
-            error = LOSS_FACTOR
-            # write onto image
-            cv2.putText(
-                cv_image,
-                "Lost LEFT",
-                (10, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 0, 255),
-                2,
-                cv2.LINE_AA,
-            )
-        if lost_right:
-            error = -LOSS_FACTOR
-            # write onto image
-            cv2.putText(
-                cv_image,
-                "Lost RIGHT",
-                (10, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 0, 255),
-                2,
-                cv2.LINE_AA,
-            )
+            for line in left_lines:
+                x1, y1, x2, y2 = line
+                cv2.line(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
-        # Print circles showing centroid, middle of screen, and error
-        if len(top_2_contours) > 1:
-            # red circles showing the centroids
-            cv2.circle(
-                cv_image, (centroids[0], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1
-            )
-            cv2.circle(
-                cv_image, (centroids[1], IMAGE_HEIGHT - CROP_AMOUNT), 5, (0, 0, 255), -1
-            )
-            # green circle showing the middle of the image
-            cv2.circle(
-                cv_image,
-                (IMAGE_WIDTH // 2, IMAGE_HEIGHT - CROP_AMOUNT),
-                5,
-                (0, 255, 0),
-                -1,
-            )
-            # blue circle showing the mean of the centroids
-            cv2.circle(
-                cv_image,
-                (int(np.mean(centroids)), IMAGE_HEIGHT - CROP_AMOUNT),
-                5,
-                (255, 0, 0),
-                -1,
-            )
+            for line in right_lines:
+                x1, y1, x2, y2 = line
+                cv2.line(cv_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
-        cv2.putText(
-            cv_image,
-            str(self.state.current_location),
-            (10, 100),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 0, 255),
-            2,
-            cv2.LINE_AA,
-        )
-        # cv2.imshow("Desert Mask", mask)
-        cv2.imshow("Desert Image", cv_image)
-        cv2.waitKey(3)
+            # calculate the error by representing each side as a single line
+            # Then, find the "moment" of the lines,
+            # and use that as the error
+            # Lines should have a higher weighting when they are lower
+            # and a lower weighting when they are higher
+            # Lines will have a higher weighting the closer they are to the center
+            # The left and rights lines will have different "neutral"
+            # angles, due to perspective
 
-        # PID controller
+            neutral_angle = 45  # degrees
+            neutral_x = IMAGE_WIDTH // 4
+            y_mult_cutoff = IMAGE_HEIGHT - 350
+
+            right_error = 0
+            left_error = 0
+
+            # Find the equivalent line for the left lines by finding the
+            # bottom and top point
+            if len(left_lines) > 0:
+                y_max = 0
+                y_min = IMAGE_HEIGHT
+                bottom_point = None
+                top_point = None
+                for line in left_lines:
+                    if line[1] > y_max:
+                        y_max = line[1]
+                        bottom_point = line[0:2]
+                    if line[3] > y_max:
+                        y_max = line[3]
+                        bottom_point = line[2:4]
+                    if line[1] < y_min:
+                        y_min = line[1]
+                        top_point = line[0:2]
+                    if line[3] < y_min:
+                        y_min = line[3]
+                        top_point = line[2:4]
+
+                # Draw the bottom and top points onto image
+                cv2.circle(
+                    cv_image, (bottom_point[0], bottom_point[1]), 5, (0, 0, 255), -1
+                )
+                # Find the center between the two points, aand the slope
+                left_x = (bottom_point[0] + top_point[0]) // 2
+                left_y = (bottom_point[1] + top_point[1]) // 2
+                if top_point[0] == bottom_point[0]:
+                    left_slope = 1000000
+                else:
+                    left_slope = (top_point[1] - bottom_point[1]) / (
+                        top_point[0] - bottom_point[0]
+                    )
+                left_angle = np.arctan(left_slope) * 180 / np.pi  # This will output
+                if left_angle < 0:
+                    left_angle += 180
+
+                left_angle = 180 - left_angle
+
+                # ERROR IS POSITIVE IF THE CAR NEEDS TO TURN RIGHT
+
+                lateral_error = left_x - neutral_x
+                angle_error = neutral_angle - left_angle
+                # angle_error should be bigger the lower the line is
+                y_mult = max((left_y - y_mult_cutoff) ** 2 / IMAGE_HEIGHT, 0)
+                # multiply by a confidence factor depending on number of lines
+                # This will be around 0.25 for 1 line, then 0.75 for 2, and 1 for more
+                confidence_factor = min(0.25 + 0.5 * len(left_lines), 1)
+
+                # write words onto image at top left
+                cv2.putText(
+                    cv_image,
+                    "lateral error: %d . angle error: %.1f . y_mult: %.1f"
+                    % (lateral_error, angle_error, y_mult),
+                    (10, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+                # print("Left angle: ", left_angle)
+
+                # print("Left lateral error: %d . Left angle error: %.1f" % (lateral_error*OKX, angle_error*OKY*y_mult))
+
+                left_error = (
+                    OKX * lateral_error + OKY * y_mult * angle_error
+                ) * confidence_factor
+
+            # Find the equivalent line for the right lines by finding the
+            # bottom and top point
+            if len(right_lines) > 0:
+                y_max = 0
+                y_min = IMAGE_HEIGHT
+                bottom_point = None
+                top_point = None
+                for line in right_lines:
+                    if line[1] > y_max:
+                        y_max = line[1]
+                        bottom_point = line[0:2]
+                    if line[3] > y_max:
+                        y_max = line[3]
+                        bottom_point = line[2:4]
+                    if line[1] < y_min:
+                        y_min = line[1]
+                        top_point = line[0:2]
+                    if line[3] < y_min:
+                        y_min = line[3]
+                        top_point = line[2:4]
+
+                cv2.circle(
+                    cv_image, (bottom_point[0], bottom_point[1]), 5, (255, 0, 0), -1
+                )
+                # Find the center between the two points, and the slope
+                right_x = (bottom_point[0] + top_point[0]) // 2
+                right_y = (bottom_point[1] + top_point[1]) // 2
+                if top_point[0] == bottom_point[0]:
+                    right_slope = 1000000
+                else:
+                    right_slope = (top_point[1] - bottom_point[1]) / (
+                        top_point[0] - bottom_point[0]
+                    )
+                right_angle = np.arctan(right_slope) * 180 / np.pi  # This will output
+                if right_angle < 0:
+                    right_angle += 180
+                right_angle = 180 - right_angle
+
+                # print("Right angle: ", right_angle)
+
+                # ERROR IS POSITIVE IF THE CAR NEEDS TO TURN RIGHT
+
+                lateral_error = right_x - (IMAGE_WIDTH - neutral_x)
+                angle_error = (180 - neutral_angle) - right_angle
+                # angle_error should be bigger the lower the line is
+                y_mult = max((right_y - y_mult_cutoff) ** 2 / IMAGE_HEIGHT, 0)
+                confidence_factor = min(0.25 + 0.5 * len(right_lines), 1)
+
+                right_error = (
+                    OKX * lateral_error + OKY * y_mult * angle_error
+                ) * confidence_factor
+
+                # write words onto image at bottom right
+                cv2.putText(
+                    cv_image,
+                    "lateral error: %d . angle error: %.1f . y_mult: %.1f"
+                    % (lateral_error, angle_error, y_mult),
+                    (IMAGE_WIDTH - 900, IMAGE_HEIGHT - 50),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+                # print("Right lateral error: %d . Right angle error: %.1f" % (lateral_error*OKX, angle_error*OKY*y_mult))
+
+            total_error = left_error + right_error
+
         move = Twist()
 
-        # print("Desert error", error)
-        derivative = error - self.previous_error
-        self.previous_error = error
+        total_error = -total_error  # correct for the way twist works
+        derivative = total_error - self.previous_error
+        self.previous_error = total_error
 
-        move.angular.z = OKP * KP * error + KD * derivative
+        move.angular.z = OKP * KP * total_error + KD * OKD * derivative
         # print("Desert angular speed:", move.angular.z)
 
-        move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
+        move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(total_error))
         # print("Desert linear speed:", move.linear.x)
 
         self.move_pub.publish(move)
 
-    # TODO: make this more efficient/ more reliable
-    def process_image(self, image):
-        # mask the image
-        mask = cv2.inRange(image, LOWER_DIRT, UPPER_DIRT)
 
-        # Define a kernel (structuring element)
-        kernel = np.ones((3, 3), np.uint8)
+    def classify_sets(self, unclassified_lines):
+        left_lines = set()
+        left_lines_2 = set()
+        right_lines = set()
+        right_lines_2 = set()
 
-        # Perform 1st dilation
-        dilated_image = cv2.dilate(mask, kernel, iterations=1)
+        rejection_angle = np.pi / 2 - 0.3
 
-        # Perform erosion
-        eroded_image = cv2.erode(dilated_image, kernel, iterations=2)
+        # classify the first and second left lines
+        left_line = None
+        left_line_2 = None
+        for line in unclassified_lines:
+            if self.line_angle(line) > (np.pi - rejection_angle):
+                if line[2] < IMAGE_WIDTH // 2 and line[0] < IMAGE_WIDTH // 2:
+                    if left_line is None:
+                        left_line = line
+                    elif self.line_length(line) > self.line_length(left_line):
+                        if left_line_2 is None:
+                            left_line_2 = left_line
+                        left_line = line
+                    # If the line is a near duplicate, don't add it
+                    elif left_line_2 is None and not self.lines_same(left_line, line):
+                        left_line_2 = line
+                    # If the line is a near duplicate, don't add it
+                    elif (
+                        left_line_2 is not None
+                        and self.line_length(line) > self.line_length(left_line_2)
+                        and not self.lines_same(left_line, line)
+                    ):
+                        left_line_2 = line
 
-        # Perform 2nd dilation
-        dilated_image = cv2.dilate(eroded_image, kernel, iterations=8)
+        if left_line is not None:
+            left_lines.add(left_line)
+            # draw the line onto the image
+            # x1, y1, x2, y2 = left_line
+            # cv2.line(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
-        dilate_contours, _ = cv2.findContours(
-            dilated_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
+        if left_line_2 is not None:
+            left_lines_2.add(left_line_2)
+            # x1, y1, x2, y2 = left_line_2
+            # cv2.line(cv_image, (x1, y1), (x2, y2), (0, 255, 255), 2)
 
-        dilate_contours = sorted(dilate_contours, key=cv2.contourArea, reverse=True)
+        # classify the first and second right lines
+        right_line = None
+        right_line_2 = None
+        for line in unclassified_lines:
+            if self.line_angle(line) < rejection_angle:
+                if line[2] > IMAGE_WIDTH // 2 and line[0] > IMAGE_WIDTH // 2:
+                    if right_line is None:
+                        right_line = line
+                    elif self.line_length(line) > self.line_length(right_line):
+                        if right_line_2 is None:
+                            right_line_2 = right_line
+                        right_line = line
+                    elif right_line_2 is None and not self.lines_same(right_line, line):
+                        right_line_2 = line
+                    elif (
+                        right_line_2 is not None
+                        and self.line_length(line) > self.line_length(right_line_2)
+                        and not self.lines_same(right_line, line)
+                    ):
+                        right_line_2 = line
 
-        top_two_contours = dilate_contours[:2]
+        if right_line is not None:
+            right_lines.add(right_line)
+            # x1, y1, x2, y2 = right_line
+            # cv2.line(cv_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
-        return top_two_contours
+        if right_line_2 is not None:
+            right_lines_2.add(right_line_2)
+            # x1, y1, x2, y2 = right_line_2
+            # cv2.line(cv_image, (x1, y1), (x2, y2), (255, 255, 0), 2)
 
-    def offroad_driving2(self, cv_image):
-        lost_left = False
-        lost_right = False
+        # Check between left and right line which is lower - classify that set first
+        left_y_max = IMAGE_HEIGHT
+        right_y_max = IMAGE_HEIGHT
 
-        lines = self.process_image(cv_image)
-        left_xs = {}
-        right_xs = {}
-        if lines is not None:
-            for line in lines:
-                x1, y1, x2, y2 = line[0]
-                cv2.line(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                if x1 < IMAGE_WIDTH // 2 and x2 < IMAGE_WIDTH // 2:
-                    left_xs[x1] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-                    left_xs[x2] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-                elif x1 > IMAGE_WIDTH // 2 and x2 > IMAGE_WIDTH // 2:
-                    right_xs[x1] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-                    right_xs[x2] = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-            # calcualte the error by weighting and averaging the left and right sides
-            max_length = np.sqrt(IMAGE_HEIGHT**2 + (IMAGE_WIDTH / 2) ** 2)
-            if len(left_xs) > 0:
-                left_value = sum(
-                    key * (value / max_length) for key, value in left_xs.items()
-                ) / len(left_xs)
-                left_value = np.mean(list(left_xs.keys()))
-            if len(right_xs) > 0:
-                right_value = sum(
-                    key * (value / max_length) for key, value in right_xs.items()
-                ) / len(right_xs)
-                right_value = np.mean(list(right_xs.keys()))
+        for line in left_lines:
+            if line[1] > left_y_max:
+                left_y_max = line[1]
+            if line[3] > left_y_max:
+                left_y_max = line[3]
 
-            if len(left_xs) > 0 and len(right_xs) > 0:
-                print("left", left_value, "right", right_value)
-                error = IMAGE_WIDTH / 2 - np.mean([left_value, right_value])
-            elif len(left_xs) > 0:
-                lost_right = True
-                error = IMAGE_WIDTH / 2 - left_value
-            elif len(right_xs) > 0:
-                lost_left = True
-                error = IMAGE_WIDTH / 2 - right_value
+        for line in right_lines:
+            if line[1] < right_y_max:
+                right_y_max = line[1]
+            if line[3] < right_y_max:
+                right_y_max = line[3]
+
+        # Determine the order of operations
+
+        if left_y_max > right_y_max:
+            first_set = left_lines
+            second_set = right_lines
+            first_set_2 = left_lines_2
+            second_set_2 = right_lines_2
+            unclassified_lines -= left_lines
+
         else:
-            error = -IMAGE_WIDTH / 2 if self.previous_error < 0 else IMAGE_WIDTH / 2
+            first_set = right_lines
+            second_set = left_lines
+            first_set_2 = right_lines_2
+            second_set_2 = left_lines_2
+            unclassified_lines -= right_lines
 
-        # TODO: maybe smooth this out? might not need it idk
-        if lost_left:  # This will bias the car to the left if the left side is lost
-            error = LOSS_FACTOR
-            # write onto image
-            cv2.putText(
-                cv_image,
-                "Lost LEFT",
-                (10, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 0, 255),
-                2,
-                cv2.LINE_AA,
-            )
-        if lost_right:
-            error = -LOSS_FACTOR
-            # write onto image
-            cv2.putText(
-                cv_image,
-                "Lost RIGHT",
-                (10, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 0, 255),
-                2,
-                cv2.LINE_AA,
-            )
+        # Classify first set (first_set)
+        self.add_lines_to_set(unclassified_lines, first_set)
 
-        # Print circles showing centroid, middle of screen, and error
-        if len(left_xs) > 0:
-            # red circles showing the centroids
-            cv2.circle(
-                cv_image,
-                (int(left_value), IMAGE_HEIGHT - CROP_AMOUNT),
-                5,
-                (0, 0, 255),
-                -1,
-            )
-        if len(right_xs) > 0:
-            cv2.circle(
-                cv_image,
-                (int(right_value), IMAGE_HEIGHT - CROP_AMOUNT),
-                5,
-                (0, 0, 255),
-                -1,
-            )
-            # green circle showing the middle of the image
-            cv2.circle(
-                cv_image,
-                (IMAGE_WIDTH // 2, IMAGE_HEIGHT - CROP_AMOUNT),
-                5,
-                (0, 255, 0),
-                -1,
-            )
-        if len(left_xs) > 0 and len(right_xs) > 0:
-            # blue circle showing the mean of the centroids
-            cv2.circle(
-                cv_image,
-                (int(np.mean([left_value, right_value])), IMAGE_HEIGHT - CROP_AMOUNT),
-                5,
-                (255, 0, 0),
-                -1,
+        # Check if unclassified_lines contains first_set_2
+        # If so, classify first_set_2
+        if unclassified_lines & first_set_2:
+            self.add_lines_to_set(unclassified_lines, first_set_2)
+
+        # If first_set_2 is larger than first_set, use it instead
+        if len(first_set_2) > len(first_set):
+            # Remove all lines from first_set and replace with first_set_2
+            first_set.clear()
+            first_set.update(first_set_2)
+
+        # If second_set is not in unclassified_lines, it is already classified
+        # so we can't use it
+        if unclassified_lines & second_set:
+            # Repeat for second_set
+            self.add_lines_to_set(unclassified_lines, second_set)
+        else:
+            second_set -= (
+                second_set  # Make it empty while keeping the link to the original set
             )
 
-        cv2.putText(
-            cv_image,
-            str(error),
-            (10, 100),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 0, 255),
-            2,
-            cv2.LINE_AA,
-        )
-        self.capture_images2(cv_image)
+        # Check if unclassified_lines contains line_2 (second_set_2)
+        # If so, classify second_set_2
+        if unclassified_lines & second_set_2:
+            self.add_lines_to_set(unclassified_lines, second_set_2)
+        else:
+            second_set_2 -= second_set_2
 
-        cv2.imshow("Desert Image", cv_image)
-        cv2.waitKey(3)
+        # Replace second_set with second_set_2 if it is larger
+        if len(second_set_2) > len(second_set):
+            second_set.clear()
+            second_set.update(second_set_2)
 
-        # PID controller
-        move = Twist()
+        # If both sets are empty, check remaining unclassified lines
+        if len(second_set) == 0 and len(second_set_2) == 0:
+            second_set -= second_set
+            new_line = None
+            for line in unclassified_lines:
+                if left_y_max > right_y_max:  # unclassified lines are right
+                    if self.line_angle(line) < rejection_angle:
+                        if new_line is None:
+                            new_line = line
+                        elif self.line_length(line) > self.line_length(new_line):
+                            new_line = line
+                else:  # unclassified lines are left
+                    if self.line_angle(line) > np.pi - rejection_angle:
+                        if new_line is None:
+                            new_line = line
+                        elif self.line_length(line) > self.line_length(new_line):
+                            new_line = line
 
-        print("Desert error", error)
-        derivative = error - self.previous_error
-        self.previous_error = error
+            if new_line is not None:
+                second_set.add(new_line)
 
-        move.angular.z = KP * error + KD * derivative
-        print("Desert angular speed:", move.angular.z)
+                self.add_lines_to_set(unclassified_lines, second_set)
 
-        move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(error))
-        print("Desert linear speed:", move.linear.x)
+        return left_lines, right_lines
 
-        self.move_pub.publish(move)
+    def add_lines_to_set(self, unclassified, set):
+        line_classified = True
+        while line_classified:
+            line_classified = False
+            for line in list(unclassified):
+                # Check if the line is in the region of a left line
+                is_near = self.near_set(line, set)
+                if is_near:
+                    set.add(line)
+                    unclassified.remove(line)
+                    line_classified = True
+
+    def line_length(self, line):
+        x1, y1, x2, y2 = line
+        return np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+
+    def line_angle(self, line):
+        """Returns the angle of the line in radians
+        If angled to the right, the angle will be from 0 to pi/2
+        If angled to the left, the angle will be from pi/2 to pi"""
+        x1, y1, x2, y2 = line
+        angle = np.arctan2(y2 - y1, x2 - x1)  # from -pi to pi
+        if angle < 0:
+            angle += np.pi
+        return angle
+
+    def near_set(self, line, set):
+        """Returns whether the line is in the region of a line in the set"""
+        if len(set) == 0:
+            return False
+
+        for set_line in set:
+            # If either point of the line is within set_threshold pixels of any point on
+            # the set line, return true
+            if self.point_near_line(line[0:2], set_line) or self.point_near_line(
+                line[2:4], set_line
+            ):
+                return True
+
+        return False
+
+    def point_near_line(self, point, line):
+        x1, y1, x2, y2 = line
+        x, y = point
+
+        set_threshold = 35
+
+        # If the point is too far outside the points of the line, return false
+        if (x + set_threshold < x1 and x + set_threshold < x2) or (
+            x - set_threshold > x1 and x - set_threshold > x2
+        ):
+            return False
+        elif (y + set_threshold < y1 and y + set_threshold < y2) or (
+            y - set_threshold > y1 and y - set_threshold > y2
+        ):
+            return False
+        # Otherwise, calculate distance to line, and return if it is small enough
+        else:
+            distance = abs((x2 - x1) * (y1 - y) - (x1 - x) * (y2 - y1)) / np.sqrt(
+                (y2 - y1) ** 2 + (x2 - x1) ** 2
+            )
+            return distance < set_threshold
 
     def crop_to_floor(self, image):
-        # convert to HSV
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        kernel = np.ones((2, 2), np.uint8)
-
-        # generate floor mask
-        lower_hsv = np.array([6, 23, 118])
-        upper_hsv = np.array([84, 255, 255])
-
-        floor_mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
-
+        # Mask for floor
+        floor_mask = cv2.inRange(
+            cv2.cvtColor(image, cv2.COLOR_BGR2HSV), FLOOR_LOWER_HSV, FLOOR_UPPER_HSV
+        )
         # clean up the mask
-        floor_mask = cv2.erode(floor_mask, kernel, iterations=1)
-        # generate floor mask
-        lower_green = np.array([60, 136, 25])
-        upper_green = np.array([75, 145, 35])
+        floor_mask = cv2.erode(floor_mask, KERNEL_2, iterations=1)
 
-        green_mask = cv2.inRange(image, lower_green, upper_green)
-
+        # Mask for green
+        green_mask = cv2.inRange(image, GREEN_LOWER, GREEN_UPPER)
         # clean up the mask
-        kernel = np.ones((5, 5), np.uint8)
-        green_mask = cv2.dilate(green_mask, kernel, iterations=4)
+        green_mask = cv2.dilate(green_mask, KERNEL_5, iterations=4)
 
         # set all images outside the mask to black
-        image[floor_mask == 0] = 0
-        image[green_mask > 0] = 0
+        total_mask = cv2.bitwise_and(floor_mask, cv2.bitwise_not(green_mask))
+        image = cv2.bitwise_and(image, image, mask=total_mask)
 
-        # generate mask for the ROI
-        mask = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        mask[mask > 0] = 255
+        # Find the y value of the lowest point of the mask
+        _, min_y, _, _ = cv2.boundingRect(total_mask)
 
-        # find the minimum y value and crop the image to that
-        nonzero_points = np.column_stack(np.where(floor_mask > 0))
-        min_y = np.min(nonzero_points[:, 0])
-        cropped_img = image[min_y:, :]
-        cropped_mask = mask[min_y:, :]
-
-        return cropped_img, cropped_mask
+        return image[min_y:, :], total_mask[min_y:, :], min_y
 
     def process_image(self, image):
-        image, mask = self.crop_to_floor(image)
+        start_time = time.time()
+        image, mask, min_y = self.crop_to_floor(image)
 
         # find canny edges for the image and the mask
-        blurred = cv2.bilateralFilter(image, d=9, sigmaColor=75, sigmaSpace=75)
+
+        start_time = time.time()
+        blurred = cv2.bilateralFilter(image, d=7, sigmaColor=75, sigmaSpace=55)
+        print("Time taken to blur bilateral: ", time.time() - start_time)
+
+        start_time = time.time()
         edges = cv2.Canny(blurred, 50, 150)
+
         edges_mask = cv2.Canny(mask, 50, 150)
 
         # dilate the edges mask
-        kernel = np.ones((2, 2), np.uint8)
-        edges_mask = cv2.dilate(edges_mask, kernel, iterations=2)
+        edges_mask = cv2.dilate(edges_mask, KERNEL_3, iterations=2)
 
         # remove edeges from edges that are also in edges_mask
         edges[edges_mask == 255] = 0
+        
+        print("Time taken to find edges: ", time.time() - start_time)
 
+        start_time = time.time()
         # Use Hough Line Transform to find line segments on the edges
         lines = cv2.HoughLinesP(
             edges, 1, np.pi / 180, threshold=50, minLineLength=20, maxLineGap=20
@@ -739,15 +881,19 @@ class topic_publisher:
             maxLineGap=20,
         )
 
-        # Draw the lines on a new copy of the original image
-        image_with_lines2 = image.copy()
-        if lines is not None:
-            for line in lines:
-                x1, y1, x2, y2 = line[0]
-                cv2.line(image_with_lines2, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        print("Time taken to find lines: ", time.time() - start_time)
+
+        if lines is None:
+            return None
+
+        # Add min_y to the y values of the lines to account for the crop
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            line[0][1] += min_y
+            line[0][3] += min_y
 
         return lines
-
+      
     def desert(self, cv_image):
         lower_blue = np.array([0, 0, 0])
         upper_blue = np.array([110, 3, 3])
@@ -879,6 +1025,20 @@ class topic_publisher:
             move.angular.z = 0.2*KP * error + KD * derivative
 
         self.move_pub.publish(move)
+        
+    def lines_same(self, line1, line2):
+        # If both points are within 15 pixels of each other, return true
+        x1, y1, x2, y2 = line1
+        x3, y3, x4, y4 = line2
+        distance1 = min(
+            np.sqrt((x1 - x3) ** 2 + (y1 - y3) ** 2),
+            np.sqrt((x1 - x4) ** 2 + (y1 - y4) ** 2),
+        )
+        distance2 = min(
+            np.sqrt((x2 - x3) ** 2 + (y2 - y3) ** 2),
+            np.sqrt((x2 - x4) ** 2 + (y2 - y4) ** 2),
+        )
+        return distance1 < 15 and distance2 < 15
 
     def spawn_position(self, position):
         msg = ModelState()
@@ -899,7 +1059,7 @@ class topic_publisher:
 
         except rospy.ServiceException:
             print("Service call failed")
-            
+
     def update_clue(self, cv_image):
         """Crops the image to the clue, if one is found
         Stores the best clue in state"""
@@ -913,15 +1073,16 @@ class topic_publisher:
         lh = 120
         ls = 100
         lv = 70
-        lower_hsv = np.array([lh,ls,lv])
-        upper_hsv = np.array([uh,us,uv])
+        lower_hsv = np.array([lh, ls, lv])
+        upper_hsv = np.array([uh, us, uv])
 
         # Threshold the HSV image to get only blue colors
         mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
 
         # find contours in the mask
-        cnts, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP,
-                cv2.CHAIN_APPROX_SIMPLE)
+        cnts, hierarchy = cv2.findContours(
+            mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
+        )
 
         # Find the contours that are holes (i.e. have a parent)
         holes = []
@@ -941,25 +1102,39 @@ class topic_publisher:
             # If the area is bigger than the previous biggest area, update the best clue
             # and reset the time since the clue improved
             if clue_size > self.state.max_area:
-
                 self.state.max_area = clue_size
                 self.state.clue_improved_time = time.time()
-            
+
                 # Template that the clue will be warped onto
                 clue = np.zeros((400, 600, 3), np.uint8)
 
-                top_right, bottom_right, bottom_left, top_left = self.find_clue_corners(clue_border)
+                top_right, bottom_right, bottom_left, top_left = self.find_clue_corners(
+                    clue_border
+                )
 
                 input_pts = np.float32([top_right, bottom_right, bottom_left, top_left])
-                output_pts = np.float32([[clue.shape[1],0], [clue.shape[1],clue.shape[0]], [0,clue.shape[0]], [0,0]])
+                output_pts = np.float32(
+                    [
+                        [clue.shape[1], 0],
+                        [clue.shape[1], clue.shape[0]],
+                        [0, clue.shape[0]],
+                        [0, 0],
+                    ]
+                )
 
                 matrix = cv2.getPerspectiveTransform(input_pts, output_pts)
-                self.state.best_clue = cv2.warpPerspective(cv_image,matrix,(clue.shape[1], clue.shape[0]),flags=cv2.INTER_LINEAR)
-        
+                self.state.best_clue = cv2.warpPerspective(
+                    cv_image,
+                    matrix,
+                    (clue.shape[1], clue.shape[0]),
+                    flags=cv2.INTER_LINEAR,
+                )
+
         return
 
     def submit_clue(self):
-        # Get the words from the clue 
+        # cv2.imshow("Best Clue", self.state.best_clue)
+        # Get the words from the clue
         type, clue = self.find_words()
         print("TYPE:", type)
         print("CLUE:", clue)
@@ -976,15 +1151,12 @@ class topic_publisher:
                 if dist < min_dist:
                     min_dist = dist
                     type_num = CLUE_TYPES[key]
-        
+
         # Publish the clue
         self.score_pub.publish("%s,%s,%d,%s" % (TEAM_NAME, PASSWORD, type_num, clue))
 
     def find_words(self):
         clue = self.state.best_clue
-
-        cv2.imshow("Clue", clue)
-        cv2.waitKey(3)
 
         clue_plate = clue[200:395, 5:595].copy()
         type_plate = clue[5:200, 5:595].copy()
@@ -999,29 +1171,29 @@ class topic_publisher:
         ls = 100
         lv = 80
 
-        lower_hsv = np.array([lh,ls,lv])
-        upper_hsv = np.array([uh,us,uv])
+        lower_hsv = np.array([lh, ls, lv])
+        upper_hsv = np.array([uh, us, uv])
 
         type_mask = cv2.inRange(type_hsv, lower_hsv, upper_hsv)
         clue_mask = cv2.inRange(clue_hsv, lower_hsv, upper_hsv)
 
         # Dilate then erode to fill them in (?)
-        kernel = np.ones((3,3),np.uint8)
         for i in range(10):
-            type_mask = cv2.dilate(type_mask, kernel, iterations=1)
-            clue_mask = cv2.dilate(clue_mask, kernel, iterations=1)
+            type_mask = cv2.dilate(type_mask, KERNEL_3, iterations=1)
+            clue_mask = cv2.dilate(clue_mask, KERNEL_3, iterations=1)
 
-            type_mask = cv2.erode(type_mask, kernel, iterations=1)
-            clue_mask = cv2.erode(clue_mask, kernel, iterations=1)
-
+            type_mask = cv2.erode(type_mask, KERNEL_3, iterations=1)
+            clue_mask = cv2.erode(clue_mask, KERNEL_3, iterations=1)
 
         # Find contours (letters)
 
-        type_cnts, _ = cv2.findContours(type_mask, cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE)
+        type_cnts, _ = cv2.findContours(
+            type_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
 
-        clue_cnts, _ = cv2.findContours(clue_mask, cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE)
+        clue_cnts, _ = cv2.findContours(
+            clue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
 
         # Remove contours that are too small
 
@@ -1033,26 +1205,50 @@ class topic_publisher:
         typeBoundingBoxes = [cv2.boundingRect(c) for c in type_cnts]
 
         # sort the contours from left-to-right
-        typeBoundingBoxes = sorted((typeBoundingBoxes), key=lambda b:b[0], reverse=False)
-        clueBoundingBoxes = sorted((clueBoundingBoxes), key=lambda b:b[0], reverse=False)
-        
+        typeBoundingBoxes = sorted(
+            (typeBoundingBoxes), key=lambda b: b[0], reverse=False
+        )
+        clueBoundingBoxes = sorted(
+            (clueBoundingBoxes), key=lambda b: b[0], reverse=False
+        )
+
         # If any bounding boxes are too big, split it (in case 2 letters' contours are connected)
         for i in range(len(clueBoundingBoxes)):
             if clueBoundingBoxes[i][2] > 60:
-                box1 = (clueBoundingBoxes[i][0], clueBoundingBoxes[i][1], clueBoundingBoxes[i][2]//2, clueBoundingBoxes[i][3])
-                box2 = (clueBoundingBoxes[i][0] + clueBoundingBoxes[i][2]//2, clueBoundingBoxes[i][1], clueBoundingBoxes[i][2]//2, clueBoundingBoxes[i][3])
+                box1 = (
+                    clueBoundingBoxes[i][0],
+                    clueBoundingBoxes[i][1],
+                    clueBoundingBoxes[i][2] // 2,
+                    clueBoundingBoxes[i][3],
+                )
+                box2 = (
+                    clueBoundingBoxes[i][0] + clueBoundingBoxes[i][2] // 2,
+                    clueBoundingBoxes[i][1],
+                    clueBoundingBoxes[i][2] // 2,
+                    clueBoundingBoxes[i][3],
+                )
                 clueBoundingBoxes.remove(clueBoundingBoxes[i])
                 clueBoundingBoxes.insert(i, box1)
-                clueBoundingBoxes.insert(i+1, box2)
+                clueBoundingBoxes.insert(i + 1, box2)
                 print("SPLIT LETTERS!")
 
         for i in range(len(typeBoundingBoxes)):
             if typeBoundingBoxes[i][2] > 60:
-                box1 = (typeBoundingBoxes[i][0], typeBoundingBoxes[i][1], typeBoundingBoxes[i][2]//2, typeBoundingBoxes[i][3])
-                box2 = (typeBoundingBoxes[i][0] + typeBoundingBoxes[i][2]//2, typeBoundingBoxes[i][1], typeBoundingBoxes[i][2]//2, typeBoundingBoxes[i][3])
+                box1 = (
+                    typeBoundingBoxes[i][0],
+                    typeBoundingBoxes[i][1],
+                    typeBoundingBoxes[i][2] // 2,
+                    typeBoundingBoxes[i][3],
+                )
+                box2 = (
+                    typeBoundingBoxes[i][0] + typeBoundingBoxes[i][2] // 2,
+                    typeBoundingBoxes[i][1],
+                    typeBoundingBoxes[i][2] // 2,
+                    typeBoundingBoxes[i][3],
+                )
                 typeBoundingBoxes.remove(typeBoundingBoxes[i])
                 typeBoundingBoxes.insert(i, box1)
-                typeBoundingBoxes.insert(i+1, box2)
+                typeBoundingBoxes.insert(i + 1, box2)
                 print("SPLIT LETTERS!")
 
         # Letter Template
@@ -1063,19 +1259,43 @@ class topic_publisher:
         # For each rectangle (which is a letter), warp perspective to get the letter into the template
         for i in range(len(typeBoundingBoxes)):
             (x, y, w, h) = typeBoundingBoxes[i]
-            input_pts = np.float32([[x+w,y], [x+w,y+h], [x,y+h], [x,y]])
-            output_pts = np.float32([[letter.shape[1],0], [letter.shape[1],letter.shape[0]], [0,letter.shape[0]], [0,0]])
+            input_pts = np.float32([[x + w, y], [x + w, y + h], [x, y + h], [x, y]])
+            output_pts = np.float32(
+                [
+                    [letter.shape[1], 0],
+                    [letter.shape[1], letter.shape[0]],
+                    [0, letter.shape[0]],
+                    [0, 0],
+                ]
+            )
             matrix = cv2.getPerspectiveTransform(input_pts, output_pts)
-            letter = cv2.warpPerspective(type_plate,matrix,(letter.shape[1], letter.shape[0]),flags=cv2.INTER_LINEAR)
+            letter = cv2.warpPerspective(
+                type_plate,
+                matrix,
+                (letter.shape[1], letter.shape[0]),
+                flags=cv2.INTER_LINEAR,
+            )
             letter = cv2.cvtColor(letter, cv2.COLOR_BGR2GRAY)
             letter_imgs.append(np.array(letter))
 
         for i in range(len(clueBoundingBoxes)):
             (x, y, w, h) = clueBoundingBoxes[i]
-            input_pts = np.float32([[x+w,y], [x+w,y+h], [x,y+h], [x,y]])
-            output_pts = np.float32([[letter.shape[1],0], [letter.shape[1],letter.shape[0]], [0,letter.shape[0]], [0,0]])
+            input_pts = np.float32([[x + w, y], [x + w, y + h], [x, y + h], [x, y]])
+            output_pts = np.float32(
+                [
+                    [letter.shape[1], 0],
+                    [letter.shape[1], letter.shape[0]],
+                    [0, letter.shape[0]],
+                    [0, 0],
+                ]
+            )
             matrix = cv2.getPerspectiveTransform(input_pts, output_pts)
-            letter = cv2.warpPerspective(clue_plate,matrix,(letter.shape[1], letter.shape[0]),flags=cv2.INTER_LINEAR)
+            letter = cv2.warpPerspective(
+                clue_plate,
+                matrix,
+                (letter.shape[1], letter.shape[0]),
+                flags=cv2.INTER_LINEAR,
+            )
             letter = cv2.cvtColor(letter, cv2.COLOR_BGR2GRAY)
             letter_imgs.append(np.array(letter))
 
@@ -1084,30 +1304,33 @@ class topic_publisher:
         outputs = []
 
         print("FOUND LETTERS, BEGINNING PREDICTION")
-        
-        self.lite_model.resize_tensor_input(self.lite_model.get_input_details()[0]['index'], [len(letter_imgs), 130, 80, 1])
-        self.lite_model.allocate_tensors()
-    
-        self.lite_model.set_tensor(self.input_details[0]['index'], letter_imgs.astype(np.float32))
-        self.lite_model.invoke()
-            
-        outputs = self.lite_model.get_tensor(self.output_details[0]['index'])
-        outputs = np.array(outputs)
 
-        print("Prediction time:", time.time() - start_time)
+        self.lite_model.resize_tensor_input(
+            self.lite_model.get_input_details()[0]["index"],
+            [len(letter_imgs), 130, 80, 1],
+        )
+        self.lite_model.allocate_tensors()
+
+        self.lite_model.set_tensor(
+            self.input_details[0]["index"], letter_imgs.astype(np.float32)
+        )
+        self.lite_model.invoke()
+
+        outputs = self.lite_model.get_tensor(self.output_details[0]["index"])
+        outputs = np.array(outputs)
 
         predicted_values = np.argmax(outputs, axis=1)
         # turn the predicted values into the characters/numbers
-        predicted_values = [chr(x+65) if x < 26 else str(x-26) for x in predicted_values]
+        predicted_values = [
+            chr(x + 65) if x < 26 else str(x - 26) for x in predicted_values
+        ]
         predicted_values = "".join(predicted_values)
-        
-        type = predicted_values[:len(typeBoundingBoxes)]
-        clue = predicted_values[len(typeBoundingBoxes):]
 
-        print("Completed Prediction. Took " + str(time.time()-start_time) + " seconds")
+        type = predicted_values[: len(typeBoundingBoxes)]
+        clue = predicted_values[len(typeBoundingBoxes) :]
 
         return type, clue
-        
+
     # TODO: clean this up, make constants, etc. also prob more testing
     def obstacle_detection(self, cv_image):
         """Function for the OBSTACLE state"""
@@ -1166,7 +1389,6 @@ class topic_publisher:
         move.angular.z = 0.0
         move.linear.x = 0.0
         self.move_pub.publish(move)
-
 
     def find_clue_corners(self, clue_border):
         # Simplify the contour to 4 points
