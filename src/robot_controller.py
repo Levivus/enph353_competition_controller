@@ -68,7 +68,7 @@ KP = 0.02
 KD = 0.004
 OKP = 0.45  # desert KP, multiplies KP
 OKD = 0.7  # desert KD, multiplies KD
-OKX = 1.6  # desert lateral multiplier
+OKX = 1.1  # desert lateral multiplier
 OKY = 0.25  # desert angle multiplier
 MAX_SPEED = 0.8
 MAX_SPEED_OFFROAD = 0.6
@@ -397,9 +397,12 @@ class topic_publisher:
             # The left and rights lines will have different "neutral"
             # angles, due to perspective
 
-            neutral_angle = 35  # degrees
+            neutral_angle = 30 # degrees
             neutral_x = IMAGE_WIDTH // 4
             y_mult_cutoff = IMAGE_HEIGHT - 325
+            angle_exp = 0.45
+            y_mult_intercept = 0.7
+            y_mult_exp = 0.85
 
             right_error = 0
             left_error = 0
@@ -447,9 +450,9 @@ class topic_publisher:
                 # ERROR IS POSITIVE IF THE CAR NEEDS TO TURN RIGHT
 
                 lateral_error = left_x - neutral_x
-                angle_error = (neutral_angle - left_angle)*abs(neutral_angle - left_angle)**0.45
+                angle_error = (neutral_angle - left_angle)*abs(neutral_angle - left_angle)**angle_exp
                 # angle_error should be bigger the lower the line is
-                y_mult = max((left_y - y_mult_cutoff) * abs((left_y - y_mult_cutoff)) ** 0.4 / IMAGE_HEIGHT, 0)+0.5
+                y_mult = max((left_y - y_mult_cutoff) * abs((left_y - y_mult_cutoff)) ** y_mult_exp / IMAGE_HEIGHT, 0)+y_mult_intercept
                 # multiply by a confidence factor depending on number of lines
                 # This will be around 0.25 for 1 line, then 0.5 for 2, and 1 for more
                 confidence_factor = len(left_lines)/(len(left_lines)+len(right_lines))
@@ -511,9 +514,9 @@ class topic_publisher:
                 # ERROR IS POSITIVE IF THE CAR NEEDS TO TURN RIGHT
 
                 lateral_error = right_x - (IMAGE_WIDTH - neutral_x)
-                angle_error = ((180 - neutral_angle) - right_angle) * abs((180 - neutral_angle) - right_angle)**0.45
+                angle_error = ((180 - neutral_angle) - right_angle) * abs((180 - neutral_angle) - right_angle)**angle_exp
                 # angle_error should be bigger the lower the line is
-                y_mult = max((right_y - y_mult_cutoff) * abs((right_y - y_mult_cutoff)) ** 0.4  / IMAGE_HEIGHT, 0)+0.5
+                y_mult = max((right_y - y_mult_cutoff) * abs((right_y - y_mult_cutoff)) ** y_mult_exp  / IMAGE_HEIGHT, 0)+y_mult_intercept
                 confidence_factor = len(right_lines)/(len(left_lines)+len(right_lines))
 
                 right_error = (
