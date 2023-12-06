@@ -38,7 +38,7 @@ IMAGE_HEIGHT = 720
 IMAGE_WIDTH = 1280
 IMAGE_DEPTH = 3
 OBSTACLE_FRAME_COUNT = 10
-OBSTACLE_THRESHOLD = 1000
+OBSTACLE_THRESHOLD = 800
 
 # IMAGE MANIPULATION CONSTANTS
 CROP_AMOUNT = 250
@@ -47,6 +47,7 @@ RESPAWN_THRESHOLD = 5
 LOWER_PINK = np.array([200, 0, 200], dtype=np.uint8)
 UPPER_PINK = np.array([255, 150, 255], dtype=np.uint8)
 PINK_THRESHOLD = 30000
+DESERT_PINK_THRESHOLD = 30000
 LOWER_RED = np.array([0, 0, 200], dtype=np.uint8)
 UPPER_RED = np.array([100, 100, 255], dtype=np.uint8)
 RED_THRESHOLD = 60000
@@ -66,11 +67,13 @@ KERNEL_5 = np.ones((5, 5), np.uint8)
 KP = 0.02
 KD = 0.004
 OKP = 0.45  # desert KP, multiplies KP
-OKD = 1  # desert KD, multiplies KD
-OKX = 1  # desert lateral multiplier
-OKY = 0.2  # desert angle multiplier
+OKD = 0.7  # desert KD, multiplies KD
+OKX = 1.6  # desert lateral multiplier
+OKY = 0.25  # desert angle multiplier
 MAX_SPEED = 0.8
+MAX_SPEED_OFFROAD = 0.6
 SPEED_DROP = 0.00055
+SPEED_DROP_OFFROAD = 0.0012
 
 CLUE_TYPES = {
     "SIZE": 1,
@@ -137,18 +140,20 @@ class State:
         self.location_count = self.LOCATIONS.index(location)
 
     def choose_action(self):
-        if self.current_state & self.OBSTACLE:
-            return self.Action.SIT
-        elif self.current_state & self.PINK:
+        if self.current_state & self.PINK:
             if (
                 self.current_state & self.PINK_ON
                 and self.currentTime - self.last_pink_time > 5
             ):
+                self.detection_enabled = False
                 self.last_pink_time = self.currentTime
                 self.current_state &= ~self.PINK_ON
                 self.location_count += 1
+                print("STATE CHANGED")
                 self.current_location = self.LOCATIONS[self.location_count]
                 return self.Action.DRIVE
+        elif self.current_state & self.OBSTACLE:
+            return self.Action.SIT
         elif self.current_state & self.DRIVING:
             return self.Action.DRIVE
         # Based on the current state, choose an action to take
@@ -188,7 +193,7 @@ class topic_publisher:
         self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
         self.running = True
         self.img_count = 0
-        self.spawn_position(HOME)
+        self.spawn_position(OFFROAD_TEST)
         print("init done")
 
     def clock_callback(self, data):
@@ -392,9 +397,9 @@ class topic_publisher:
             # The left and rights lines will have different "neutral"
             # angles, due to perspective
 
-            neutral_angle = 45  # degrees
+            neutral_angle = 35  # degrees
             neutral_x = IMAGE_WIDTH // 4
-            y_mult_cutoff = IMAGE_HEIGHT - 300
+            y_mult_cutoff = IMAGE_HEIGHT - 325
 
             right_error = 0
             left_error = 0
@@ -442,16 +447,28 @@ class topic_publisher:
                 # ERROR IS POSITIVE IF THE CAR NEEDS TO TURN RIGHT
 
                 lateral_error = left_x - neutral_x
-                angle_error = neutral_angle - left_angle
+                angle_error = (neutral_angle - left_angle)*abs(neutral_angle - left_angle)**0.45
                 # angle_error should be bigger the lower the line is
-                y_mult = max((left_y - y_mult_cutoff) ** 2 / IMAGE_HEIGHT, 0)
+                y_mult = max((left_y - y_mult_cutoff) * abs((left_y - y_mult_cutoff)) ** 0.4 / IMAGE_HEIGHT, 0)+0.5
                 # multiply by a confidence factor depending on number of lines
                 # This will be around 0.25 for 1 line, then 0.5 for 2, and 1 for more
-                confidence_factor = min(0.25 + 0.25 * len(left_lines), 1)
+                confidence_factor = len(left_lines)/(len(left_lines)+len(right_lines))
 
                 left_error = (
                     OKX * lateral_error + OKY * y_mult * angle_error
                 ) * confidence_factor
+
+                cv2.putText(
+                cv_image,
+                "lateral error: %d . angle error: %.1f . y_mult: %.1f"
+                % (lateral_error, angle_error, y_mult),
+                (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
 
             # Find the equivalent line for the right lines by finding the
             # bottom and top point
@@ -494,10 +511,10 @@ class topic_publisher:
                 # ERROR IS POSITIVE IF THE CAR NEEDS TO TURN RIGHT
 
                 lateral_error = right_x - (IMAGE_WIDTH - neutral_x)
-                angle_error = (180 - neutral_angle) - right_angle
+                angle_error = ((180 - neutral_angle) - right_angle) * abs((180 - neutral_angle) - right_angle)**0.45
                 # angle_error should be bigger the lower the line is
-                y_mult = max((right_y - y_mult_cutoff) ** 2 / IMAGE_HEIGHT, 0)
-                confidence_factor = min(0.25 + 0.5 * len(right_lines), 1)
+                y_mult = max((right_y - y_mult_cutoff) * abs((right_y - y_mult_cutoff)) ** 0.4  / IMAGE_HEIGHT, 0)+0.5
+                confidence_factor = len(right_lines)/(len(left_lines)+len(right_lines))
 
                 right_error = (
                     OKX * lateral_error + OKY * y_mult * angle_error
@@ -537,12 +554,13 @@ class topic_publisher:
         self.previous_error = total_error
 
         move.angular.z = OKP * KP * total_error + KD * OKD * derivative
-        cv2.putText(cv_image, "Angular velocity: %.2f" % move.angular.z, (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+        direction = "right" if move.angular.z < 0 else "left"
+        cv2.putText(cv_image, "Angular velocity: %.2f,%s" % (move.angular.z,direction), (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
 
-        move.linear.x = max(0, MAX_SPEED - SPEED_DROP * abs(total_error))
+        move.linear.x = max(0, MAX_SPEED - SPEED_DROP_OFFROAD * abs(total_error))
 
         # Save the image
-        cv2.imwrite(CAPTURE_PATH + "offroad%d.png" % self.img_count, cv_image)
+        cv2.imwrite(CAPTURE_PATH + "offroad_images/offroad%d.png" % self.img_count, cv_image)
         self.img_count += 1
 
         self.move_pub.publish(move)
@@ -565,7 +583,7 @@ class topic_publisher:
                     if left_line is None:
                         left_line = line
                     elif self.line_length(line) > self.line_length(left_line):
-                        if left_line_2 is None:
+                        if left_line_2 is None and not self.lines_same(left_line, line):
                             left_line_2 = left_line
                         left_line = line
                     # If the line is a near duplicate, don't add it
@@ -594,7 +612,7 @@ class topic_publisher:
                     if right_line is None:
                         right_line = line
                     elif self.line_length(line) > self.line_length(right_line):
-                        if right_line_2 is None:
+                        if right_line_2 is None and not self.lines_same(right_line, line):
                             right_line_2 = right_line
                         right_line = line
                     elif right_line_2 is None and not self.lines_same(right_line, line):
@@ -613,8 +631,8 @@ class topic_publisher:
             right_lines_2.add(right_line_2)
 
         # Check between left and right line which is lower - classify that set first
-        left_y_max = IMAGE_HEIGHT
-        right_y_max = IMAGE_HEIGHT
+        left_y_max = 0
+        right_y_max = 0
 
         for line in left_lines:
             if line[1] > left_y_max:
@@ -623,9 +641,9 @@ class topic_publisher:
                 left_y_max = line[3]
 
         for line in right_lines:
-            if line[1] < right_y_max:
+            if line[1] > right_y_max:
                 right_y_max = line[1]
-            if line[3] < right_y_max:
+            if line[3] > right_y_max:
                 right_y_max = line[3]
 
         # Determine the order of operations
@@ -965,7 +983,7 @@ class topic_publisher:
         self.move_pub.publish(move)
         
     def lines_same(self, line1, line2):
-        # If both points are within 15 pixels of each other, return true
+        # If both points are within 50 pixels of each other, return true
         x1, y1, x2, y2 = line1
         x3, y3, x4, y4 = line2
         distance1 = min(
@@ -976,7 +994,7 @@ class topic_publisher:
             np.sqrt((x2 - x3) ** 2 + (y2 - y3) ** 2),
             np.sqrt((x2 - x4) ** 2 + (y2 - y4) ** 2),
         )
-        return distance1 < 25 and distance2 < 25
+        return distance1 < 50 and distance2 < 50
 
     def spawn_position(self, position):
         msg = ModelState()
