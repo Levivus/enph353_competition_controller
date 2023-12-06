@@ -38,7 +38,7 @@ IMAGE_HEIGHT = 720
 IMAGE_WIDTH = 1280
 IMAGE_DEPTH = 3
 OBSTACLE_FRAME_COUNT = 10
-OBSTACLE_THRESHOLD = 800
+OBSTACLE_THRESHOLD = 600
 
 # IMAGE MANIPULATION CONSTANTS
 CROP_AMOUNT = 250
@@ -68,10 +68,9 @@ KP = 0.02
 KD = 0.004
 OKP = 0.45  # desert KP, multiplies KP
 OKD = 0.7  # desert KD, multiplies KD
-OKX = 1.1  # desert lateral multiplier
+OKX = 1  # desert lateral multiplier
 OKY = 0.25  # desert angle multiplier
 MAX_SPEED = 0.8
-MAX_SPEED_OFFROAD = 0.6
 SPEED_DROP = 0.00055
 SPEED_DROP_OFFROAD = 0.0012
 
@@ -123,6 +122,7 @@ class State:
         # Define the initial state
         self.location_count = 0
         self.current_location = self.LOCATIONS[self.location_count]
+        self.tunnel_state = True
         self.last_state = self.NOTHING
         self.last_pink_time = 0
         self.start_offroad_time = 500
@@ -249,7 +249,6 @@ class topic_publisher:
         elif (
             action == State.Action.DRIVE
             and self.state.current_location == State.Location.OFFROAD
-            or self.state.current_location == State.Location.MOUNTAIN
         ):
             self.offroad_driving(cv_image)
         elif (
@@ -257,6 +256,11 @@ class topic_publisher:
             and self.state.current_location == State.Location.DESERT
         ):
             self.desert(cv_image)
+        elif (
+            action == State.Action.DRIVE
+            and self.state.current_location == State.Location.MOUNTAIN
+        ):
+            self.mountain(cv_image)
         elif action == State.Action.SIT:
             self.avoid_obstacle()
 
@@ -297,8 +301,11 @@ class topic_publisher:
 
         if self.state.current_location == self.state.Location.OFFROAD:
             threshold = DESERT_PINK_THRESHOLD
-        else:
+        elif self.state.current_location == self.state.Location.ROAD:
             threshold = PINK_THRESHOLD
+        else:
+            threshold = 1000000
+            
 
         if pink_pixel_count > threshold:
             state |= self.state.PINK
@@ -772,13 +779,13 @@ class topic_publisher:
             new_line = None
             for line in unclassified_lines:
                 if left_y_max > right_y_max:  # unclassified lines are right
-                    if self.line_angle(line) < rejection_angle:
+                    if self.line_angle(line) < rejection_angle and line[2] > IMAGE_WIDTH // 2 and line[0] > IMAGE_WIDTH // 2:
                         if new_line is None:
                             new_line = line
                         elif self.line_length(line) > self.line_length(new_line):
                             new_line = line
                 else:  # unclassified lines are left
-                    if self.line_angle(line) > np.pi - rejection_angle:
+                    if self.line_angle(line) > np.pi - rejection_angle and line[2] < IMAGE_WIDTH // 2 and line[0] < IMAGE_WIDTH // 2:
                         if new_line is None:
                             new_line = line
                         elif self.line_length(line) > self.line_length(new_line):
@@ -1052,15 +1059,60 @@ class topic_publisher:
         if statey == "pink":
             move.linear.x = 0.5
 
-        if set_it_up and self.state.current_time - self.pink_tunnel_reached > 0.25:
-            if error > 5:
-                move.linear.x = 0.0
-                move.angular.z = 0.2 * KP * error + KD * derivative
+        if set_it_up:
+            if self.state.current_time - self.pink_tunnel_reached > 0.7:
+                if error > 5:
+                    move.linear.x = 0.0
+                    move.angular.z = 0.2 * KP * error + KD * derivative
+                else:
+                    # Change state to mountain
+                    self.state.current_location = self.state.Location.MOUNTAIN
             else:
-                # Change state to mountain
-                self.state.current_location = self.state.Location.MOUNTAIN
+                move.linear.x = 0.3
+                move.angular.z = 0.0
 
         self.move_pub.publish(move)
+
+    def mountain(self, cv_image):
+        if not self.state.tunnel_state:
+            self.offroad_driving(cv_image)
+            return
+        
+        lower_tunnel = np.array([80, 100, 185])
+        upper_tunnel = np.array([95, 120, 195])
+        
+        brick_mask = cv2.inRange(cv_image, lower_tunnel, upper_tunnel)
+        white_mask = cv2.inRange(cv_image, np.array([200, 200, 200]), np.array([255, 255, 255]))
+
+        tunnel_mask = cv2.bitwise_and(cv2.bitwise_not(brick_mask), cv2.bitwise_not(white_mask))
+        tunnel_mask = cv2.erode(tunnel_mask, np.ones((3, 3), np.uint8), iterations=2)
+
+        cv2.imshow("Tunnel Mask", tunnel_mask)
+        cv2.waitKey(3)
+        
+        contours, _ = cv2.findContours(tunnel_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Largest contour is the tunnel
+        if len(contours) > 0:
+            tunnel = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(tunnel) < 10000:
+                self.state.tunnel_state = False
+            # Find centroid of tunnel
+            M = cv2.moments(tunnel)
+            if M["m00"] == 0:
+                return
+            
+            centroid_x = int(M["m10"] / M["m00"])
+
+            error = (centroid_x - IMAGE_WIDTH / 2)  # positive means the car should turn right
+
+            move = Twist()
+            move.angular.z = -KP * OKP * error
+            move.linear.x = 0.6
+            self.move_pub.publish(move)
+
+        else:
+            self.state.tunnel_state = False
+            
 
     def lines_same(self, line1, line2):
         # If both points are within 50 pixels of each other, return true
@@ -1141,7 +1193,7 @@ class topic_publisher:
                         move = Twist()
                         move.linear.x = 0.1
                         self.move_pub.publish(move)
-                        rospy.sleep(0.2)
+                        rospy.sleep(0.4)
                     imgCopy = cv_image.copy()
                     cv2.drawContours(imgCopy, [cnts[i]], -1, (0, 0, 255), 4)
                     cv2.imshow("Clue", imgCopy)
