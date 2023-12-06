@@ -33,7 +33,7 @@ HOME = [5.5, 2.6, 0.1, 0.0, 0.0, np.sqrt(2), -np.sqrt(2)]
 OFFROAD_TEST = [0.5, -0.5, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
 MOUNTAIN_TEST = [-4.0, -2.35, 0.1, 0.0, 0.0, 0.0, 0.0]
 FIRST_PINK = [0.5, 0.0, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
-DESERT_TEST = [-3.5, 0.45, 0.1, 0.0, 0.0, 1, 0]
+DESERT_TEST = [-1.5, 1.4, 0.1, 0.0, 0.0, 1, 0]
 IMAGE_HEIGHT = 720
 IMAGE_WIDTH = 1280
 IMAGE_DEPTH = 3
@@ -47,7 +47,7 @@ RESPAWN_THRESHOLD = 5
 LOWER_PINK = np.array([200, 0, 200], dtype=np.uint8)
 UPPER_PINK = np.array([255, 150, 255], dtype=np.uint8)
 PINK_THRESHOLD = 30000
-DESERT_PINK_THRESHOLD = 20000
+DESERT_PINK_THRESHOLD = 8000
 LOWER_RED = np.array([0, 0, 200], dtype=np.uint8)
 UPPER_RED = np.array([100, 100, 255], dtype=np.uint8)
 RED_THRESHOLD = 60000
@@ -68,11 +68,11 @@ KP = 0.02
 KD = 0.004
 OKP = 0.45  # desert KP, multiplies KP
 OKD = 0.7  # desert KD, multiplies KD
-OKX = 1  # desert lateral multiplier
+OKX = 1  # desert lateral multiplierl
 OKY = 0.25  # desert angle multiplier
 MAX_SPEED = 0.8
 SPEED_DROP = 0.00055
-SPEED_DROP_OFFROAD = 0.0012
+SPEED_DROP_OFFROAD = 0.0018
 
 CLUE_TYPES = {
     "SIZE": 1,
@@ -123,11 +123,16 @@ class State:
         self.location_count = 0
         self.current_location = self.LOCATIONS[self.location_count]
         self.tunnel_state = True
+        self.turn_flag = False
         self.last_state = self.NOTHING
         self.last_pink_time = 0
         self.start_offroad_time = 500
         self.offroad_clue_found = False
+        self.extra_mask_enabled = True
         self.clue_first_seen = True
+        self.first_mountain_call = True
+        self.first_tunnel_line_found = False
+        self.dark_brick_state = False
         self.clue_in_view = False
         self.best_clue = np.zeros(
             (IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_DEPTH), dtype=np.uint8
@@ -137,7 +142,7 @@ class State:
         self.current_time = 0
         self.max_area = 0
         self.current_state = self.NOTHING
-        self.detection_enabled = True
+        self.detection_enabled = True # CHANGE THIS LATER
 
     def set_location(self, location):
         self.current_location = location
@@ -202,7 +207,8 @@ class topic_publisher:
         self.score_pub.publish("%s,%s,0,NA" % (TEAM_NAME, PASSWORD))
         self.running = True
         self.img_count = 0
-        self.spawn_position(OFFROAD_TEST)
+        # self.spawn_position(DESERT_TEST)
+        # self.state.set_location(State.Location.OFFROAD)
         print("init done")
 
     def clock_callback(self, data):
@@ -278,8 +284,8 @@ class topic_publisher:
         # Check for clues and update the best clue state
         self.update_clue(cv_image)
 
-        # If the clue has not improved in 3 seconds, find the letters, and reset the max area
-        if self.state.current_time - self.state.clue_improved_time > 2:
+        # If the clue has not improved in 1 seconds find the letters, and reset the max area
+        if self.state.current_time - self.state.clue_improved_time > 1:
             print("Submitting clue")
             self.submit_clue()
             self.state.clue_improved_time = (
@@ -311,8 +317,6 @@ class topic_publisher:
             state |= self.state.PINK
             if (self.state.last_state & self.state.PINK) == 0:
                 state |= self.state.PINK_ON
-                cv2.imshow("Pink Image", cv_image)
-                cv2.waitKey(3)
 
         state |= self.state.DRIVING
 
@@ -395,7 +399,7 @@ class topic_publisher:
             print("LOOKING FOR CLUE")
             # Stop driving, and turn to face the clue
             move = Twist()
-            move.angular.z = 0.5
+            move.angular.z = 0.7
             self.move_pub.publish(move)
             return
 
@@ -432,10 +436,10 @@ class topic_publisher:
 
             neutral_angle = 30  # degrees
             neutral_x = IMAGE_WIDTH // 4
-            y_mult_cutoff = IMAGE_HEIGHT - 305
+            y_mult_cutoff = IMAGE_HEIGHT - 295
             angle_exp = 0.45
-            y_mult_intercept = 0.7
-            y_mult_exp = 0.96
+            y_mult_intercept = 0.8
+            y_mult_exp = 0.97
 
             right_error = 0
             left_error = 0
@@ -465,6 +469,7 @@ class topic_publisher:
                 cv2.circle(
                     cv_image, (bottom_point[0], bottom_point[1]), 5, (0, 0, 255), -1
                 )
+
                 # Find the center between the two points, aand the slope
                 left_x = (bottom_point[0] + top_point[0]) // 2
                 left_y = (bottom_point[1] + top_point[1]) // 2
@@ -474,6 +479,19 @@ class topic_publisher:
                     left_slope = (top_point[1] - bottom_point[1]) / (
                         top_point[0] - bottom_point[0]
                     )
+
+                # If the length of the combined line is too short, calculate the angle by 
+                # taking the average of the rest of the lines
+                if self.line_length((bottom_point[0], bottom_point[1], top_point[0], top_point[1])) < 300: 
+                    last_slope = left_slope
+                    left_slope = 0
+                    for line in left_lines:
+                        left_slope += (line[3] - line[1]) / (line[2] - line[0])
+                    left_slope /= len(left_lines)
+
+                    print("left slope: ", left_slope)
+                    print("before this change: ", last_slope)
+
                 left_angle = np.arctan(left_slope) * 180 / np.pi  # This will output
                 if left_angle < 0:
                     left_angle += 180
@@ -551,6 +569,19 @@ class topic_publisher:
                     right_slope = (top_point[1] - bottom_point[1]) / (
                         top_point[0] - bottom_point[0]
                     )
+
+                # If the length of the combined line is too short, calculate the angle by 
+                # taking the average of the rest of the lines
+                if self.line_length((bottom_point[0], bottom_point[1], top_point[0], top_point[1])) < 300: 
+                    last_slope = right_slope
+                    right_slope = 0
+                    for line in right_lines:
+                        right_slope += (line[3] - line[1]) / (line[2] - line[0])
+                    right_slope /= len(right_lines)
+
+                    print("right slope: ", right_slope)
+                    print("before this change: ", last_slope)
+
                 right_angle = np.arctan(right_slope) * 180 / np.pi  # This will output
                 if right_angle < 0:
                     right_angle += 180
@@ -876,6 +907,13 @@ class topic_publisher:
 
         # set all images outside the mask to black
         total_mask = cv2.bitwise_and(floor_mask, cv2.bitwise_not(green_mask))
+
+        # Extra safety mask with manual values
+        if self.state.extra_mask_enabled:
+            extra_mask = np.ones((IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.uint8)*255
+            extra_mask[IMAGE_HEIGHT//2 - 100 : IMAGE_HEIGHT//2 + 100, :300] = 0
+            total_mask = cv2.bitwise_and(total_mask, extra_mask)
+
         image = cv2.bitwise_and(image, image, mask=total_mask)
 
         # Find the y value of the lowest point of the mask
@@ -1060,13 +1098,18 @@ class topic_publisher:
             move.linear.x = 0.5
 
         if set_it_up:
-            if self.state.current_time - self.pink_tunnel_reached > 0.7:
+            if self.state.current_time - self.pink_tunnel_reached > 0.6:
                 if error > 5:
                     move.linear.x = 0.0
                     move.angular.z = 0.2 * KP * error + KD * derivative
                 else:
                     # Change state to mountain
                     self.state.current_location = self.state.Location.MOUNTAIN
+                    print("SWITCHED TO MOUUNTAIN STATE")
+                    move.linear.x = 0.5
+                    move.angular.z = 0.0
+                    self.move_pub.publish(move)
+                    rospy.sleep(0.2)
             else:
                 move.linear.x = 0.3
                 move.angular.z = 0.0
@@ -1078,40 +1121,177 @@ class topic_publisher:
             self.offroad_driving(cv_image)
             return
         
-        lower_tunnel = np.array([80, 100, 185])
-        upper_tunnel = np.array([95, 120, 195])
-        
-        brick_mask = cv2.inRange(cv_image, lower_tunnel, upper_tunnel)
-        white_mask = cv2.inRange(cv_image, np.array([200, 200, 200]), np.array([255, 255, 255]))
-
-        tunnel_mask = cv2.bitwise_and(cv2.bitwise_not(brick_mask), cv2.bitwise_not(white_mask))
-        tunnel_mask = cv2.erode(tunnel_mask, np.ones((3, 3), np.uint8), iterations=2)
-
-        cv2.imshow("Tunnel Mask", tunnel_mask)
-        cv2.waitKey(3)
-        
-        contours, _ = cv2.findContours(tunnel_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        # Largest contour is the tunnel
-        if len(contours) > 0:
-            tunnel = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(tunnel) < 10000:
-                self.state.tunnel_state = False
-            # Find centroid of tunnel
-            M = cv2.moments(tunnel)
-            if M["m00"] == 0:
-                return
-            
-            centroid_x = int(M["m10"] / M["m00"])
-
-            error = (centroid_x - IMAGE_WIDTH / 2)  # positive means the car should turn right
-
+        if self.state.first_mountain_call:
             move = Twist()
-            move.angular.z = -KP * OKP * error
             move.linear.x = 0.6
             self.move_pub.publish(move)
+            print("STRAIGHT TO TUNNEL")
+            rospy.sleep(0.7)
+            self.state.first_mountain_call = False
+            print("STARTING TUNNEL STATE")
 
+        print("TUNNEL DRIVE")
+        
+        lower_tunnel = np.array([70, 90, 165])
+        upper_tunnel = np.array([105, 136, 215])
+
+        lower_dark_tunnel = np.array([30, 40, 70])
+        upper_dark_tunnel = np.array([40, 55, 85])
+
+        dark_brick_mask = cv2.inRange(cv_image, lower_dark_tunnel, upper_dark_tunnel)
+        brick_mask = cv2.inRange(cv_image, lower_tunnel, upper_tunnel)
+        dark_white_mask = cv2.inRange(cv_image, np.array([80, 80, 80]), np.array([105, 105, 105]))
+        white_mask = cv2.inRange(cv_image, np.array([200, 200, 200]), np.array([255, 255, 255]))
+
+        tunnel_mask = cv2.bitwise_or(brick_mask, white_mask)
+        dark_tunnel_mask = cv2.bitwise_or(dark_brick_mask, dark_white_mask)
+        tunnel_mask = cv2.bitwise_or(tunnel_mask, dark_tunnel_mask)
+
+        # if self.state.dark_brick_state:
+        #     brick_mask = cv2.inRange(cv_image, lower_dark_tunnel, upper_dark_tunnel)
+        #     white_mask = cv2.inRange(cv_image, np.array([80, 80, 80]), np.array([105, 105, 105]))
+        # else:   
+        #     brick_mask = cv2.inRange(cv_image, lower_tunnel, upper_tunnel)
+        #     white_mask = cv2.inRange(cv_image, np.array([200, 200, 200]), np.array([255, 255, 255]))
+        
+        # tunnel_mask = cv2.bitwise_or(brick_mask, white_mask)
+        tunnel_mask = cv2.dilate(tunnel_mask, np.ones((5, 5), np.uint8), iterations=4)
+
+        edges = cv2.Canny(tunnel_mask, 50, 150)
+
+        min_length = 400
+        left_line = None
+        right_line = None
+
+
+        #LEFT
+        while min_length > 50:
+        # Use Hough Line Transform to find line segments on the edges
+            lines = cv2.HoughLinesP(
+                edges[:, 0:IMAGE_WIDTH//2], 1, np.pi / 180, threshold=50, minLineLength=min_length, maxLineGap=20
+            )
+            print("min length: ", min_length)
+            print("Lines? : ", lines)
+            
+            min_length -= 25
+            good_lines = []            
+            if lines is not None:
+                for line in lines:
+                    if self.line_angle(line[0]) > (np.pi/2):
+                        good_lines.append(line)
+                if len(good_lines) >= 1:
+                    left_line = good_lines[0][0]
+                    break
+
+            if min_length < 100:
+                if self.state.first_tunnel_line_found:
+                    # if not self.state.dark_brick_state:
+                    #     self.state.dark_brick_state = True
+                    # else: 
+                        self.state.tunnel_state = False
+                        print("EXITED TUNNEL STATE")
+                return
+
+        #RIGHT
+        min_length = 400
+        while min_length > 50:
+        # Use Hough Line Transform to find line segments on the edges
+            lines = cv2.HoughLinesP(
+                edges[:, IMAGE_WIDTH//2:], 1, np.pi / 180, threshold=50, minLineLength=min_length, maxLineGap=20
+            )
+            print("min length: ", min_length)
+            print("Lines? : ", lines)
+
+            min_length -= 25
+            good_lines = []
+            if lines is not None:
+                for line in lines:
+                    if self.line_angle(line[0]) < (np.pi/2):
+                        good_lines.append(line)
+                if len(good_lines) >= 1:
+                    right_line = good_lines[0][0]
+                    break
+
+            if min_length < 100:
+                if self.state.first_tunnel_line_found:
+                    # if not self.state.dark_brick_state:
+                        # self.state.dark_brick_state = True
+                        # print("SWITCHED TO DARK BRICK")
+                    # else: 
+                        self.state.tunnel_state = False
+                        print("EXITED TUNNEL STATE")
+                return
+            
+        print("FOUND RIGHT AND LEFT LINES")
+        self.state.first_tunnel_line_found = True
+            
+        # Draw lines on
+        cv2.line(cv_image, (left_line[0], left_line[1]), (left_line[2], left_line[3]), (0, 0, 255), 2)
+        cv2.line(cv_image, (right_line[0]+IMAGE_WIDTH//2, right_line[1]), (right_line[2]+IMAGE_WIDTH//2, right_line[3]), 255, 2)
+
+        # Find slope of left line
+        if left_line[2] == left_line[0]:
+            left_slope = 1000000
         else:
-            self.state.tunnel_state = False
+            left_slope = (left_line[3] - left_line[1]) / (left_line[2] - left_line[0])
+        
+        # Find slope of right line
+        if right_line[2] == right_line[0]:
+            right_slope = 1000000
+        else:
+            right_slope = (right_line[3] - right_line[1]) / (right_line[2] - right_line[0])
+
+        # Find angle of left line
+        left_angle = np.arctan(left_slope) * 180 / np.pi  # This will output
+        if left_angle < 0:
+            left_angle += 180
+
+        left_angle = 180 - left_angle
+
+        # Find angle of right line
+        right_angle = np.arctan(right_slope) * 180 / np.pi  # This will output
+        if right_angle < 0:
+            right_angle += 180
+
+        right_angle = 180 - right_angle
+
+        neutral_angle = 30
+
+        left_angle_error = (neutral_angle - left_angle) * abs(
+                    neutral_angle - left_angle
+                ) ** 0.4
+
+        right_angle_error = ((180 - neutral_angle) - right_angle) * abs(
+                    (180 - neutral_angle) - right_angle
+                ) ** 0.4
+
+        left_lateral_error = abs(left_line[0]-left_line[2])//2 + min(left_line[0], left_line[2]) - IMAGE_WIDTH//4
+        right_lateral_error = abs(right_line[0]-right_line[2])//2 + min(right_line[0], right_line[2]) + IMAGE_WIDTH - IMAGE_WIDTH//4
+
+        total_error = (left_lateral_error + right_lateral_error)*0.001
+
+        move = Twist()
+        move.angular.z = total_error
+        move.linear.x = 0.3
+        self.move_pub.publish(move)
+
+        cv2.putText(
+                    cv_image,
+                    "Error: %.1f . left error: %.1f . right error: %.1f"
+                    % (total_error, left_angle_error, right_angle_error),
+                    (IMAGE_WIDTH - 900, IMAGE_HEIGHT - 50),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+        
+        cv2.imwrite(CAPTURE_PATH + "mountain_images/tunnel_img%d.png" % self.img_count, cv_image)
+        self.img_count += 1
+
+        cv2.imshow("Tunnel", cv_image)
+        cv2.waitKey(3)
             
 
     def lines_same(self, line1, line2):
@@ -1191,9 +1371,11 @@ class topic_publisher:
                     if self.state.clue_first_seen:
                         self.state.clue_first_seen = False
                         move = Twist()
-                        move.linear.x = 0.1
+                        move.linear.x = 0.3
                         self.move_pub.publish(move)
-                        rospy.sleep(0.4)
+                        self.state.turn_flag = True
+                        rospy.sleep(1)
+                        self.state.turn_flag = False
                     imgCopy = cv_image.copy()
                     cv2.drawContours(imgCopy, [cnts[i]], -1, (0, 0, 255), 4)
                     cv2.imshow("Clue", imgCopy)
@@ -1214,7 +1396,7 @@ class topic_publisher:
             if clue_size < 10000:
                 return
 
-            if self.state.Location.OFFROAD == self.state.current_location:
+            if self.state.Location.OFFROAD == self.state.current_location and not self.state.turn_flag:
                 self.state.offroad_clue_found = True
 
             # THE FOLLOWING HAPPENS IF A CLUE IS FOUND
@@ -1276,6 +1458,8 @@ class topic_publisher:
 
         if type_num == 4:
             self.state.detection_enabled = False
+        elif type_num == 6:
+            self.state.extra_mask_enabled = False
         elif type_num == 8:
             time.sleep(0.1)
             self.score_pub.publish("%s,%s,%d,%s" % (TEAM_NAME, PASSWORD, -1, "NA"))
