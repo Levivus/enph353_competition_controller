@@ -28,7 +28,7 @@ import tensorflow as tf
 
 TEAM_NAME = "MchnEarn"
 PASSWORD = "pswd"
-END_TIME = 238
+END_TIME = 230
 HOME = [5.5, 2.6, 0.1, 0.0, 0.0, np.sqrt(2), -np.sqrt(2)]
 OFFROAD_TEST = [0.5, -0.5, 0.1, 0.0, 0.0, np.sqrt(2), np.sqrt(2)]
 MOUNTAIN_TEST = [-4.0, -2.35, 0.1, 0.0, 0.0, 0.0, 0.0]
@@ -130,6 +130,7 @@ class State:
         self.last_state = self.NOTHING
         self.last_pink_time = 0
         self.start_offroad_time = 500
+        self.respawnTime = 0
         self.offroad_clue_found = False
         self.extra_mask_enabled = True
         self.never_on_top = True
@@ -138,6 +139,7 @@ class State:
         self.first_tunnel_line_found = False
         self.dark_brick_state = False
         self.clue_in_view = False
+        self.clues_submitted = []
         self.best_clue = np.zeros(
             (IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_DEPTH), dtype=np.uint8
         )
@@ -224,6 +226,36 @@ class topic_publisher:
         Publishes the score to the score tracker node when the competition ends
         """
         self.state.current_time = data.clock.secs + data.clock.nsecs / 1000000000
+        # If self.state.clues does not contain clues 5 6 and 7, and the current time is past 2:30, respawn
+        # if (1 not in self.state.clues_submitted or 2 not in self.state.clues_submitted or 3 not in self.state.clues_submitted or 3 not in self.state.clues_submitted) and self.state.current_time > 150 and self.state.current_time - self.state.respawnTime > 30:
+        #     print("RESPAWNING 1")
+        #     self.spawn_position(HOME)
+        #     self.state.current_state = self.state.DRIVING
+        #     self.state.set_location(State.Location.ROAD)
+
+        #     self.state.respawnTime = self.state.current_time
+
+
+        # elif (5 not in self.state.clues_submitted or 6 not in self.state.clues_submitted or 7 not in self.state.clues_submitted) and self.state.current_time > 150 and self.state.current_time - self.state.respawnTime > 30:
+        #     print("RESPAWNING 2")
+        #     self.spawn_position(FIRST_PINK)
+        #     self.state.current_state = self.state.DRIVING
+        #     self.state.set_location(State.Location.OFFROAD)
+        #     self.state.clues_submitted = []
+        #     self.state.max_area = 0
+        #     self.state.offroad_clue_found = False
+        #     self.state.extra_mask_enabled = True
+        #     self.state.never_on_top = True
+        #     self.state.clue_first_seen = True
+        #     self.state.first_mountain_call = True
+        #     self.state.first_tunnel_line_found = False
+        #     self.state.clue_in_view = False
+        #     self.state.start_offroad_time = self.state.current_time
+
+        if self.state.current_time - self.time_start > END_TIME:
+            print("END TIME REACHED")
+            self.score_pub.publish("%s,%s,-1,NA" % (TEAM_NAME, PASSWORD))
+            self.running = False
 
     def callback(self, data):
         """Callback for the image subscriber
@@ -305,7 +337,7 @@ class topic_publisher:
         self.update_clue(cv_image)
 
         # If the clue has not improved in 1 seconds find the letters, and reset the max area
-        if self.state.current_time - self.state.clue_improved_time > 1:
+        if self.state.current_time - self.state.clue_improved_time > 2:
             print("Submitting clue")
             self.submit_clue()
             self.state.clue_improved_time = (
@@ -671,6 +703,8 @@ class topic_publisher:
                 if total_error > 100:
                     total_error = 80
 
+            cv2.imshow("Offroad Image", cv_image)
+            cv2.waitKey(3)
             # Draw error onto image
             cv2.putText(
                 cv_image,
@@ -1237,7 +1271,6 @@ class topic_publisher:
         # cv2.imshow("Tunnel", cv_image)
         # cv2.waitKey(3)
             
-
     def lines_same(self, line1, line2):
         # If both points are within 50 pixels of each other, return true
         x1, y1, x2, y2 = line1
@@ -1361,7 +1394,7 @@ class topic_publisher:
             clue_border = max(holes, key=cv2.contourArea)
             clue_size = cv2.contourArea(clue_border)
             # Check area is big enough (to avoid false positives, or clues that are too far)
-            if clue_size < 8000:
+            if clue_size < 10000:
                 return
 
             if self.state.Location.OFFROAD == self.state.current_location and not self.state.turn_flag:
@@ -1423,6 +1456,8 @@ class topic_publisher:
 
         # Publish the clue
         self.score_pub.publish("%s,%s,%d,%s" % (TEAM_NAME, PASSWORD, type_num, clue))
+
+        self.state.clues_submitted.append(type_num)
 
         if type_num == 4:
             self.state.detection_enabled = False
@@ -1823,6 +1858,8 @@ class topic_publisher:
                 angle_error = neutral_angle - left_angle
                 # angle_error should be bigger the lower the line is
                 y_mult = max((left_y - y_mult_cutoff) ** 2 / IMAGE_HEIGHT, 0)
+                # if y_mult > 40:
+                #     y_mult = 40
                 # multiply by a confidence factor depending on number of lines
                 # This will be around 0.25 for 1 line, then 0.75 for 2, and 1 for more
                 confidence_factor = min(0.25 + 0.7 * len(left_lines), 1)
@@ -1929,7 +1966,7 @@ class topic_publisher:
         move.angular.z = 0.4 * 0.017 * total_error + 0.003 * 1 * derivative
         # print("Desert angular speed:", move.angular.z)
 
-        move.linear.x = max(0, 0.5 - 0.00055 * abs(total_error))
+        move.linear.x = max(0, 0.4 - 0.00025 * abs(total_error))
         # print("Desert linear speed:", move.linear.x)
 
         self.move_pub.publish(move)
@@ -1943,7 +1980,6 @@ def main(args):
     except KeyboardInterrupt:
         print("Shutting down")
     cv2.destroyAllWindows()
-
 
 if __name__ == "__main__":
     main(sys.argv)
