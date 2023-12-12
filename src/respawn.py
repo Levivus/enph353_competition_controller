@@ -40,7 +40,7 @@ class topic_publisher:
         while not rospy.is_shutdown():
             # Get user input from the keyboard
             user_input = input(
-                "'h' for the start, 'p' for the first pink, 't' for behind the first pink line, 'r' for just behind the red line, followed by the orientation in degrees (00), 'q' to quit: "
+                "'h' for the start, 'p' for the just behind the second pink, 't' for before the roundabaout, 'r' for just behind the red line, followed by the orientation in degrees (00), 'q' to quit: "
             )
             orientation = float(user_input[1:])
             location = user_input[0]
@@ -54,9 +54,9 @@ class topic_publisher:
             elif location == "r":
                 self.spawn_position([4.5, 1.0, 0.1, x, y, z, w])
             elif location == "p":
-                self.spawn_position([0.5, 0.0, 0.1, x, y, z, w])
+                self.spawn_position([-3.5, 0.45, 0.1, x, y, z, w])
             elif location == "t":
-                self.spawn_position([0.5, -1.0, 0.1, x, y, z, w])
+                self.spawn_position([4.0, -1.3, 0.1, x, y, z, w])
             elif user_input.lower() == "q":
                 rospy.signal_shutdown("User requested shutdown.")
 
